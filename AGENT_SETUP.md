@@ -167,6 +167,18 @@ fuzzily. Force typo-tolerant recall with:
 memo recall --fuzzy "retrie bakoff"
 ```
 
+If the user explicitly enabled QMD for this scope, meaning-based recall is
+also available:
+
+```sh
+memo recall --semantic "Why did we stop retrying mutation requests?"
+```
+
+QMD selects relevant 16-memory projection segments. OptMem then resolves the
+suggested IDs through the authoritative raw log, so treat the returned `#ID`
+lines exactly like ordinary recall. A QMD failure does not mean the memory is
+absent; retry with exact or FFF recall, or inspect `memo qmd status`.
+
 Wake output may contain a summary such as `#128-255`. Open it without searching
 the full log:
 

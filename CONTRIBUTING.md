@@ -49,6 +49,14 @@ Please preserve these unless a change explicitly redesigns them:
 - `TREE/` is a rebuildable cache, never the only copy of information.
 - Core commands require only the Python standard library.
 - FFF is optional because its Python bindings require Python 3.10+.
+- QMD is optional, explicitly enabled per scope, and never imported or
+  invoked by `note`, `nap`, `wake`, or ordinary recall.
+- `LOG.txt` is authoritative. `QMD/` is a disposable 16-record Markdown
+  projection; semantic output must resolve IDs back through the raw log.
+- Every QMD subprocess uses the dedicated `optmem` named index, a
+  collision-resistant collection, `shell=False`, a timeout, and JSON stdout.
+- Interrupted QMD synchronization must remain dirty and retryable. QMD
+  failures never prevent exact/FFF recall or mutate raw memory.
 - Every command printed by OptMem must be directly runnable on the platform
   that printed it.
 - A missing explicit `MEMORY_DIR` is an error; a project store may be created
@@ -153,5 +161,8 @@ import or required installer dependency.
   uninstall the source checkout or the developer's real installation.
 - Test exact, fuzzy, limited, and contextual recall independently; test zoom
   at its default and maximum supported depth.
+- Test QMD projection boundaries, lazy updates, canonical-ID translation,
+  rebuild/rollback, disable/purge, and subprocess failure isolation with a
+  fake executable; never require QMD or model downloads in the core suite.
 - Do not edit memory files in tests outside temporary directories.
 - Do not commit generated caches, test memories, or native wheels.

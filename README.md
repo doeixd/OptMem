@@ -10,14 +10,15 @@ package.
 
 This fork builds on [VictorTaelin/OptMem](https://github.com/VictorTaelin/OptMem)
 and adds project-scoped memory, native Windows support, optional FFF recall,
-and a polished agent/install workflow.
+optional QMD semantic recall, and a polished agent/install workflow.
 
 ![how OptMem works](anim/optmem.gif)
 
 ## Installation
 
 Prerequisite: Python 3.7 or newer. FFF-powered fuzzy recall is optional and
-requires Python 3.10 or newer.
+requires Python 3.10 or newer. QMD-powered semantic recall is separately
+optional and requires Node.js 22 or newer only when enabled.
 
 ### Linux and macOS
 
@@ -114,7 +115,7 @@ automatic:
 3. If a note requests a compression, the agent completes that `memo nap`
    before continuing.
 4. When older information is needed, the agent uses exact or fuzzy `recall`,
-   then `zoom` to inspect a summary in more detail.
+   optional semantic recall, then `zoom` to inspect a summary in more detail.
 
 Good project memory:
 
@@ -146,6 +147,12 @@ history and finer detail toward the present; `recall` searches the full raw
 log, while `zoom` opens a summary toward the entries beneath it. Compression
 makes startup context smaller—it never deletes the raw memories.
 
+When explicitly enabled for a scope, QMD gets a disposable Markdown
+projection of the same raw log in fixed 16-memory segments. QMD chooses
+relevant segments, but OptMem rereads the selected stable `#IDs` from
+`LOG.txt` before displaying them. QMD never writes memories and does not
+participate in `note`, `nap`, or `wake`.
+
 `memo wake` is special: without `MEMORY_DIR`, it reads global memory first and
 project memory second. Other commands target only one scope. Put `--global`
 before the command—not after it.
@@ -164,12 +171,17 @@ directory. Run `memo doctor` whenever the selected scope is surprising.
 | `memo completion <shell>` | print completion for Bash, Zsh, Fish, or PowerShell |
 | `memo upgrade` | download the latest release, validate it, and refresh PATH/completion setup |
 | `memo uninstall` | remove the command and shell integration while preserving every memory |
-| `memo doctor` | explain the active scope, store paths, Python, PATH, Git origin, and FFF availability |
+| `memo doctor` | explain the active scope, store paths, Python, PATH, Git origin, FFF, and QMD |
+| `memo qmd enable` | explicitly enable optional QMD semantic recall for this scope |
+| `memo qmd status` | inspect the QMD executable, projection, collection, and embeddings |
+| `memo qmd rebuild` | rebuild this scope's disposable projection and QMD collection |
+| `memo qmd disable [--purge]` | disable QMD; optionally remove its projection |
 | `memo wake` | read both memories — global, then project; first command of every session |
 | `memo note "..."` | record one memory: one line, up to 280 UTF-8 bytes (project by default) |
 | `memo nap` | answer the merges that came due |
 | `memo recall [--limit N] [--context N] <regex>` | search the complete raw log while controlling matches and neighboring entries |
 | `memo recall --fuzzy [--limit N] [--context N] "<text>"` | typo-tolerant raw-memory search with optional FFF |
+| `memo recall --semantic "<meaning>"` | meaning-based raw-memory recall with explicitly enabled QMD |
 | `memo zoom [--depth N] <lo>-<hi>` | open one to six levels of a summary-tree node |
 | `memo forget <lo>-<hi>` | drop a bad summary; the next nap rebuilds it |
 | `memo config [NAME=N]` | inspect or change the active store's reading/output limits |
@@ -236,6 +248,42 @@ the strongest matches first. FFF is instantiated only for that recall command;
 OptMem remains a one-shot CLI, so this integration uses FFF for match quality,
 not its long-lived warm-index performance.
 
+### Optional semantic recall with QMD
+
+[QMD](https://github.com/tobi/qmd) adds local BM25, vector retrieval, query
+expansion, and reranking without becoming an OptMem dependency. Install it
+only if you want meaning-based recall:
+
+```sh
+npm install -g @tobilu/qmd
+memo qmd enable
+memo recall --semantic "Why did we stop retrying mutation requests?"
+```
+
+QMD currently requires Node.js 22 or newer. The first semantic recall runs
+lazy indexing and may download QMD's local embedding, query-expansion, and
+reranking models. Those models can require roughly 2 GB in total; later
+unchanged recalls reuse the index and embeddings.
+
+The integration is per OptMem scope. Enable project memory from that project;
+use `memo --global qmd enable` separately for global memory. Both live in a
+dedicated QMD index named `optmem`, with a collision-resistant collection per
+store, so they do not enter the user's ordinary QMD knowledge base.
+
+```sh
+memo qmd status
+memo qmd rebuild
+memo qmd disable
+memo qmd disable --purge
+```
+
+`disable` unregisters the collection but keeps the disposable Markdown
+projection for a cheap re-enable. `--purge` removes the projection too.
+Neither command changes `LOG.txt`, `TREE/`, or any memory. QMD synchronization
+is lazy: `note`, `nap`, and `wake` never launch Node or generate projection
+files. If semantic recall fails, OptMem reports that failure explicitly while
+exact and FFF recall remain available.
+
 ## Why split memory
 
 A single log is one identity, and wake spends its reading budget on the
@@ -260,6 +308,7 @@ true tomorrow in a repository you have never seen.
   memory/           the global memory (create with `memo init`)
     LOG.txt         every memory, one per line, append-only, never edited
     TREE/           the summaries: a cache, rebuildable from the log alone
+    QMD/            optional 16-memory Markdown projection, fully disposable
     config          the sizes, written by `memo config`
 
 $XDG_DATA_HOME/optmem/   (default: ~/.local/share/optmem)
@@ -312,6 +361,10 @@ to discard the old process PATH. It also leaves managed blocks in connected
 `AGENTS.md`, `CLAUDE.md`, and other instruction files; remove those blocks
 manually if you are permanently retiring OptMem. Delete memory directories
 manually only when you intentionally want to erase that data.
+
+If QMD was enabled, run `memo qmd disable --purge` in each enabled scope
+before uninstalling when you also want its external collection and local
+projection removed.
 
 Start troubleshooting with:
 
@@ -403,6 +456,8 @@ Never edit or delete a memory directory: the tool manages it.
 directly. Add `--limit N` to cap matched entries and `--context N` to
 include neighboring raw memories; neither makes the search less complete.
 Recall and `zoom` read the project memory; put `--global` first for global.
+If QMD was explicitly enabled for this scope, use
+`memo recall --semantic "<meaning>"` for meaning-based raw-memory recall.
 
 A `#a-b` line from `wake` is one summary node covering raw memory IDs
 `a` through `b`. `memo zoom <a-b>` opens one level; add `--depth N`

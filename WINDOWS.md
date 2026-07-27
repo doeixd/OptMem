@@ -110,6 +110,8 @@ afterward to remove the old command from that process's PATH. If permanently
 retiring OptMem, remove its `OPTMEM:START`/`OPTMEM:END` blocks from
 `AGENTS.md`, `CLAUDE.md`, or other connected instruction files. Delete the
 memory directories separately only if you intentionally want to erase them.
+If QMD is enabled, run `memo qmd disable --purge` in each enabled scope before
+uninstalling to remove its projections and external collections too.
 
 ## Shell completion
 
@@ -133,6 +135,21 @@ memo recall --fuzzy "aproximate memry"
 ```
 
 Exact `memo recall <regex>` continues to work without FFF.
+
+QMD-powered semantic recall is a separate opt-in and requires Node.js 22+:
+
+```powershell
+npm install -g @tobilu/qmd
+memo qmd enable
+memo recall --semantic "Why did we change the retry policy?"
+memo qmd status
+```
+
+The first semantic recall may download roughly 2 GB of local QMD models.
+OptMem creates its disposable 16-memory Markdown projection lazily and never
+invokes QMD from `note`, `nap`, or `wake`. Remove the integration without
+touching memories using `memo qmd disable`, or also remove the projection with
+`memo qmd disable --purge`.
 
 ## Override scoping
 

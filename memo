@@ -11,13 +11,14 @@ Start here:
   {memo} completion <shell>      print bash, zsh, fish, or powershell setup
   {memo} upgrade                 download and validate the latest release
   {memo} uninstall               remove the tool; preserve every memory
-  {memo} doctor                  check installation, scope, stores, and FFF
+  {memo} doctor                  check installation, scope, stores, FFF, QMD
+  {memo} qmd <command>           manage optional semantic recall
   {memo} wake [part [T]]         read global then project memory
 
 Remember and retrieve:
   {memo} note "<one line>"       save to this project's memory
   {memo} recall [options] <query>
-                                 search raw memories with limit/context
+                                 exact, fuzzy, or optional semantic recall
   {memo} zoom [--depth N] <range>
                                  open one or more summary-tree levels
 
@@ -37,6 +38,8 @@ See github.com/doeixd/OptMem.
 """
 
 import datetime
+import hashlib
+import json
 try:
     import fcntl
 except ImportError:
@@ -108,6 +111,10 @@ RAW_MAX = 16  # blocks up to this many memories compress from the raw log
 MAX_RECALL_LIMIT = 1000
 MAX_RECALL_CONTEXT = 20
 MAX_ZOOM_DEPTH = 6
+QMD_SEGMENT_SIZE = 16
+QMD_INDEX = "optmem"
+QMD_QUERY_SEGMENTS = 3
+QMD_MEMORIES_PER_SEGMENT = 5
 
 
 # Records are FIXED WIDTH, so a memory or a block is found by seeking to its
@@ -648,6 +655,8 @@ Never edit or delete a memory directory: the tool manages it.
 directly. Add `--limit N` to cap matched entries and `--context N` to
 include neighboring raw memories; neither makes the search less complete.
 Recall and `zoom` read the project memory; put `--global` first for global.
+If QMD was explicitly enabled for this scope, use
+`{memo} recall --semantic "<meaning>"` for meaning-based raw-memory recall.
 
 A `#a-b` line from `wake` is one summary node covering raw memory IDs
 `a` through `b`. `{memo} zoom <a-b>` opens one level; add `--depth N`
@@ -685,7 +694,7 @@ _memo_completion() {
     done
 
     if [ -z "$cmd" ]; then
-        _memo_compgen -W "--global init setup completion upgrade uninstall doctor wake note recall zoom nap forget config import" -- "$cur"
+        _memo_compgen -W "--global init setup completion upgrade uninstall doctor qmd wake note recall zoom nap forget config import" -- "$cur"
         return
     fi
     case "$cmd" in
@@ -700,7 +709,10 @@ _memo_completion() {
             _memo_compgen -W "bash zsh fish powershell" -- "$cur"
             ;;
         recall)
-            _memo_compgen -W "--fuzzy --limit --context" -- "$cur"
+            _memo_compgen -W "--fuzzy --semantic --limit --context" -- "$cur"
+            ;;
+        qmd)
+            _memo_compgen -W "enable status rebuild disable --purge" -- "$cur"
             ;;
         zoom)
             _memo_compgen -W "--depth" -- "$cur"
@@ -726,6 +738,7 @@ _memo() {
         'upgrade:download and validate the latest release'
         'uninstall:remove the tool while preserving memories'
         'doctor:diagnose installation and memory scope'
+        'qmd:manage optional QMD semantic recall'
         'wake:read global then project memory'
         'note:record one durable memory'
         'recall:search recorded memories'
@@ -756,9 +769,14 @@ _memo() {
         completion) _values 'shell' bash zsh fish powershell ;;
         recall)
             _arguments '--fuzzy[use typo-tolerant FFF recall]' \
+                '--semantic[use optional QMD meaning-based recall]' \
                 '--limit=[maximum matching memories]:count:' \
                 '--context=[neighboring memories on each side]:count:' \
                 '*:query:'
+            ;;
+        qmd)
+            _arguments '--purge[remove the disposable projection]' \
+                '1:qmd command:(enable status rebuild disable)'
             ;;
         zoom)
             _arguments '--depth=[tree levels to open]:depth:' '1:block id:'
@@ -789,6 +807,7 @@ complete -c memo -n __memo_needs_command -a completion -d 'Print a shell complet
 complete -c memo -n __memo_needs_command -a upgrade -d 'Download and validate the latest release'
 complete -c memo -n __memo_needs_command -a uninstall -d 'Remove the tool while preserving memories'
 complete -c memo -n __memo_needs_command -a doctor -d 'Diagnose installation and memory scope'
+complete -c memo -n __memo_needs_command -a qmd -d 'Manage optional QMD semantic recall'
 complete -c memo -n __memo_needs_command -a wake -d 'Read global then project memory'
 complete -c memo -n __memo_needs_command -a note -d 'Record one durable memory'
 complete -c memo -n __memo_needs_command -a recall -d 'Search recorded memories'
@@ -801,9 +820,12 @@ complete -c memo -n 'contains -- setup (commandline -opc)' -l create -d 'Create 
 complete -c memo -n 'contains -- setup (commandline -opc)' -l no-create -d 'Skip missing files'
 complete -c memo -n 'contains -- completion (commandline -opc)' -a 'bash zsh fish powershell'
 complete -c memo -n 'contains -- recall (commandline -opc)' -l fuzzy -d 'Use typo-tolerant FFF recall'
+complete -c memo -n 'contains -- recall (commandline -opc)' -l semantic -d 'Use optional QMD meaning-based recall'
 complete -c memo -n 'contains -- recall (commandline -opc)' -l limit -r -d 'Maximum matching memories'
 complete -c memo -n 'contains -- recall (commandline -opc)' -l context -r -d 'Neighboring memories on each side'
 complete -c memo -n 'contains -- zoom (commandline -opc)' -l depth -r -d 'Tree levels to open'
+complete -c memo -n 'contains -- qmd (commandline -opc)' -a 'enable status rebuild disable'
+complete -c memo -n 'contains -- qmd (commandline -opc); and contains -- disable (commandline -opc)' -l purge -d 'Remove the disposable projection'
 complete -c memo -n 'contains -- config (commandline -opc)' -a 'WAKE_LINES= ENTRY_CHARS= PART_CHARS= PART_LINES='""",
     "powershell": r"""# PowerShell completion for memo
 Register-ArgumentCompleter -Native -CommandName memo -ScriptBlock {
@@ -816,6 +838,7 @@ Register-ArgumentCompleter -Native -CommandName memo -ScriptBlock {
         upgrade    = 'Download and validate the latest release'
         uninstall  = 'Remove the tool while preserving memories'
         doctor     = 'Diagnose installation and memory scope'
+        qmd        = 'Manage optional QMD semantic recall'
         wake       = 'Read global then project memory'
         note       = 'Record one durable memory'
         recall     = 'Search recorded memories'
@@ -837,7 +860,8 @@ Register-ArgumentCompleter -Native -CommandName memo -ScriptBlock {
         $candidates = switch ($command) {
             setup      { '--create', '--no-create' }
             completion { 'bash', 'zsh', 'fish', 'powershell' }
-            recall     { '--fuzzy', '--limit', '--context' }
+            recall     { '--fuzzy', '--semantic', '--limit', '--context' }
+            qmd        { 'enable', 'status', 'rebuild', 'disable', '--purge' }
             zoom       { '--depth' }
             config     { 'WAKE_LINES=', 'ENTRY_CHARS=', 'PART_CHARS=', 'PART_LINES=' }
             default    { @() }
@@ -1269,6 +1293,7 @@ def cmd_uninstall(d, args):
     print("Preserved project memories: %s" % pretty(project_root))
     print("Agent instruction blocks were not removed. If retiring OptMem,")
     print("remove its OPTMEM:START/END block from connected instruction files.")
+    print("QMD projections and external collections were not removed.")
     print("Open a new shell to finish removing memo from the current PATH.")
 
 
@@ -1424,7 +1449,7 @@ def wake_both(args):
 
 def cmd_note(d, args):
     if len(args) != 1:
-        die("usage: %s note \"<one line, at most %d chars>\""
+        die("usage: %s note \"<one line, at most %d UTF-8 bytes>\""
             % (ME, ENTRY_CHARS))
     text = check(args[0])
     i = log_append(d, [(datetime.date.today().isoformat(), text)])
@@ -1499,6 +1524,407 @@ def cmd_forget(d, args):
           % (plural(len(gone), "summary"), gone[0][0], gone[0][1] - 1, ME))
 
 
+class QmdError(Exception):
+    pass
+
+
+def qmd_dir(d):
+    """The disposable Markdown projection for one authoritative store."""
+    path = os.path.join(d, "QMD")
+    if os.path.lexists(path) and os.path.islink(path):
+        raise QmdError("refusing symbolic-link projection at %s" % pretty(path))
+    return path
+
+
+def qmd_collection(d):
+    """A stable, path-private name inside QMD's dedicated OptMem index."""
+    path = os.path.normcase(os.path.realpath(os.path.abspath(d)))
+    return "optmem-" + hashlib.sha256(path.encode("utf-8")).hexdigest()[:12]
+
+
+def _qmd_run(args, timeout=120):
+    """Run QMD through one narrow, non-shell adapter."""
+    exe = shutil.which("qmd")
+    if not exe:
+        raise QmdError(
+            "qmd is not installed (install with: npm install -g @tobilu/qmd)")
+    env = dict(os.environ)
+    env["NO_COLOR"] = "1"
+    try:
+        result = subprocess.run(
+            [exe, "--index", QMD_INDEX] + list(args),
+            shell=False, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        raise QmdError("qmd timed out after %d seconds" % timeout)
+    except OSError as e:
+        raise QmdError("could not start qmd: %s" % (e.strerror or e))
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        detail = "; ".join(line.strip() for line in detail.splitlines()
+                           if line.strip())[:500]
+        raise QmdError(detail or "qmd exited with status %d" % result.returncode)
+    return result.stdout.strip()
+
+
+def _qmd_file(d, name):
+    return os.path.join(qmd_dir(d), name)
+
+
+def qmd_enabled(d):
+    try:
+        return os.path.isfile(_qmd_file(d, "enabled"))
+    except QmdError:
+        return False
+
+
+def _qmd_write(path, data):
+    if os.path.isdir(path):
+        raise QmdError("projection path is a directory: %s" % pretty(path))
+    _atomic_replace(path, data, os.path.lexists(path))
+
+
+def _qmd_mark(d, name):
+    os.makedirs(qmd_dir(d), exist_ok=True)
+    _qmd_write(_qmd_file(d, name), b"1\n")
+
+
+def _qmd_state(d):
+    path = _qmd_file(d, "state")
+    if not os.path.isfile(path) or os.path.islink(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(state, dict) or state.get("format") != 1 or
+            state.get("segmentSize") != QMD_SEGMENT_SIZE or
+            type(state.get("logRecords")) is not int or
+            state["logRecords"] < 0):
+        return None
+    return state
+
+
+_QMD_SEGMENT_RE = re.compile(r"^(\d{8})-(\d{8})\.md$")
+_QMD_RESULT_RE = re.compile(
+    r"(?:^|[/\\])(\d{8})-(\d{8})\.md(?:\?|$)")
+_QMD_MASK = ("[0-9]" * 8) + "-" + ("[0-9]" * 8) + ".md"
+
+
+def _qmd_segment_name(lo):
+    return "%08d-%08d.md" % (lo, lo + QMD_SEGMENT_SIZE - 1)
+
+
+def _qmd_projection_files(d):
+    path = qmd_dir(d)
+    if not os.path.isdir(path):
+        return set()
+    return {name for name in os.listdir(path)
+            if _QMD_SEGMENT_RE.match(name)
+            and os.path.isfile(os.path.join(path, name))
+            and not os.path.islink(os.path.join(path, name))}
+
+
+def _qmd_segment(source, lo, T):
+    source.seek(lo * LOG_REC)
+    entries = records(source.read(
+        (min(lo + QMD_SEGMENT_SIZE, T) - lo) * LOG_REC))
+    lines = ["#%d %s %s" % entry for entry in entries]
+    return ("\n\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
+
+
+def _qmd_sync_projection(d):
+    """Incrementally derive fixed Markdown segments from the raw log."""
+    with locked(d):
+        T = log_len(d)
+        state = _qmd_state(d)
+        old = state["logRecords"] if state else None
+        expected = {_qmd_segment_name(lo)
+                    for lo in range(0, T, QMD_SEGMENT_SIZE)}
+        existing = _qmd_projection_files(d)
+        changed = old != T or existing != expected
+        if not changed:
+            return False, T, len(expected)
+
+        os.makedirs(qmd_dir(d), exist_ok=True)
+        _qmd_mark(d, "dirty")
+        rewrite_from = 0 if old is None else (
+            min(old, T) // QMD_SEGMENT_SIZE) * QMD_SEGMENT_SIZE
+        with open(log_path(d), "rb") as source:
+            for lo in range(0, T, QMD_SEGMENT_SIZE):
+                name = _qmd_segment_name(lo)
+                if name not in existing or lo >= rewrite_from:
+                    _qmd_write(
+                        _qmd_file(d, name), _qmd_segment(source, lo, T))
+        for name in existing - expected:
+            os.unlink(_qmd_file(d, name))
+        encoded = (json.dumps({
+            "format": 1,
+            "logRecords": T,
+            "segmentSize": QMD_SEGMENT_SIZE,
+        }, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        _qmd_write(_qmd_file(d, "state"), encoded)
+        return True, T, len(expected)
+
+
+def _qmd_context(d):
+    global_path = os.path.normcase(os.path.realpath(
+        os.path.abspath(os.path.expanduser(GLOBAL))))
+    this_path = os.path.normcase(os.path.realpath(os.path.abspath(d)))
+    if this_path == global_path:
+        return ("Global OptMem memory: durable user preferences and facts "
+                "that apply across projects.")
+    if os.environ.get("MEMORY_DIR"):
+        return ("Explicit OptMem memory: durable decisions, constraints, "
+                "preferences, and facts stored in this selected scope.")
+    origin = git("remote", "get-url", "origin")
+    if origin:
+        parts = re.split(r"[:/]", re.sub(r"\.git/*$", "", origin).rstrip("/"))
+        label = "/".join(parts[-2:])
+        return ("Project OptMem memory for repository %s: architecture "
+                "decisions, commands, failed approaches, and "
+                "repository-specific facts." % label)
+    return ("Project OptMem memory: architecture decisions, commands, failed "
+            "approaches, and repository-specific facts.")
+
+
+def _qmd_collection_exists(d):
+    name = qmd_collection(d)
+    try:
+        details = _qmd_run(["collection", "show", name], timeout=30)
+        match = re.search(r"(?m)^\s*Path:\s*(.+?)\s*$", details)
+        if not match:
+            raise QmdError("qmd collection show returned no path for %s" % name)
+        actual = os.path.normcase(os.path.realpath(
+            os.path.abspath(os.path.expanduser(match.group(1)))))
+        expected = os.path.normcase(os.path.realpath(
+            os.path.abspath(qmd_dir(d))))
+        if actual != expected:
+            raise QmdError(
+                "QMD collection %s points at %s, expected %s"
+                % (name, pretty(actual), pretty(expected)))
+        return True
+    except QmdError as e:
+        if "collection not found" in str(e).lower():
+            return False
+        raise
+
+
+def _qmd_ensure_collection(d, context=True):
+    name = qmd_collection(d)
+    created = False
+    if not _qmd_collection_exists(d):
+        _qmd_run(["collection", "add", qmd_dir(d), "--name", name,
+                  "--mask", _QMD_MASK], timeout=300)
+        created = True
+    if context and created:
+        try:
+            _qmd_run(["context", "add", "qmd://%s" % name, _qmd_context(d)])
+        except QmdError:
+            try:
+                _qmd_run(["collection", "remove", name])
+            except QmdError:
+                pass
+            raise
+    return created
+
+
+def _qmd_index_projection(d):
+    """Bring QMD up to date, retrying after any interrupted prior attempt."""
+    changed, T, segments = _qmd_sync_projection(d)
+    created = _qmd_ensure_collection(d)
+    dirty = os.path.isfile(_qmd_file(d, "dirty"))
+    if changed or created or dirty:
+        _qmd_run(["update"], timeout=300)
+        _qmd_run(["embed", "-c", qmd_collection(d)], timeout=1800)
+        try:
+            os.unlink(_qmd_file(d, "dirty"))
+        except FileNotFoundError:
+            pass
+    return T, segments
+
+
+def _qmd_reset_projection(d):
+    path = qmd_dir(d)
+    if not os.path.isdir(path):
+        return
+    for name in os.listdir(path):
+        if name in ("state", "dirty") or _QMD_SEGMENT_RE.match(name):
+            target = os.path.join(path, name)
+            if os.path.isdir(target) and not os.path.islink(target):
+                raise QmdError("unexpected directory in projection: %s"
+                               % pretty(target))
+            os.unlink(target)
+
+
+def _qmd_purge_projection(d):
+    path = qmd_dir(d)
+    if not os.path.lexists(path):
+        return
+    expected = os.path.normcase(os.path.abspath(os.path.join(d, "QMD")))
+    actual = os.path.normcase(os.path.abspath(path))
+    if actual != expected or os.path.islink(path):
+        raise QmdError("refusing unsafe projection purge at %s" % pretty(path))
+    shutil.rmtree(path)
+
+
+def _qmd_remove_collection(d):
+    try:
+        if _qmd_collection_exists(d):
+            _qmd_run(["collection", "remove", qmd_collection(d)])
+        return None
+    except QmdError as e:
+        return str(e)
+
+
+def _qmd_status(d, probe=True):
+    exists = os.path.isdir(d)
+    enabled = exists and qmd_enabled(d)
+    projection = "not created"
+    records = segments = 0
+    dirty = False
+    unsafe = os.path.islink(os.path.join(d, "QMD")) if exists else False
+    if unsafe:
+        projection = "unsafe symbolic link"
+    elif exists and os.path.isdir(os.path.join(d, "QMD")):
+        state = _qmd_state(d)
+        records = log_len(d)
+        expected = (records + QMD_SEGMENT_SIZE - 1) // QMD_SEGMENT_SIZE
+        actual = len(_qmd_projection_files(d))
+        dirty = os.path.isfile(_qmd_file(d, "dirty"))
+        if state and state["logRecords"] == records and actual == expected:
+            projection = "%s, %s in %s" % (
+                "current" if not dirty else "current projection; index pending",
+                plural(records, "memory"), plural(actual, "segment"))
+        else:
+            projection = "stale or incomplete"
+        segments = actual
+
+    executable = "not installed"
+    collection = "%s (not checked)" % qmd_collection(d)
+    registered = None
+    if probe:
+        try:
+            executable = _qmd_run(["--version"], timeout=30) or "available"
+        except QmdError as e:
+            executable = "unavailable: %s" % e
+            collection = "%s (unavailable)" % qmd_collection(d)
+        else:
+            try:
+                registered = _qmd_collection_exists(d)
+                collection = "%s (%s)" % (
+                    qmd_collection(d),
+                    "registered" if registered else "missing")
+            except QmdError as e:
+                collection = "%s (error: %s)" % (qmd_collection(d), e)
+    embeddings = ("inactive" if not enabled else
+                  "missing collection" if registered is False else
+                  "pending sync" if dirty else
+                  "unknown" if probe and registered is None else
+                  "current (last OptMem sync)"
+                  if projection.startswith("current") else "unknown")
+    return {
+        "executable": executable,
+        "enabled": enabled,
+        "projection": projection,
+        "collection": collection,
+        "embeddings": embeddings,
+        "records": records,
+        "segments": segments,
+    }
+
+
+def cmd_qmd(d, args):
+    if not args or args[0] not in ("enable", "status", "rebuild", "disable"):
+        die("usage: %s qmd <enable|status|rebuild|disable [--purge]>" % ME)
+    command, rest = args[0], args[1:]
+    if command == "status":
+        if rest:
+            die("usage: %s qmd status" % ME)
+        state = _qmd_status(d)
+        print("OptMem QMD")
+        print("  QMD executable:  %s" % state["executable"])
+        print("  Integration:     %s" %
+              ("enabled" if state["enabled"] else "disabled"))
+        print("  Projection:      %s" % state["projection"])
+        print("  Collection:      %s" % state["collection"])
+        print("  Embeddings:      %s" % state["embeddings"])
+        if "unavailable:" in state["executable"]:
+            print("  Exact/FFF recall remains available.")
+        return
+    if command == "enable":
+        if rest:
+            die("usage: %s qmd enable" % ME)
+        was_enabled = qmd_enabled(d)
+        had_projection = os.path.isdir(qmd_dir(d))
+        created = False
+        try:
+            _qmd_run(["--version"], timeout=30)
+            _qmd_sync_projection(d)
+            created = _qmd_ensure_collection(d)
+            if not created:
+                _qmd_run(["context", "add",
+                          "qmd://%s" % qmd_collection(d), _qmd_context(d)])
+            if created:
+                _qmd_mark(d, "dirty")
+            _qmd_mark(d, "enabled")
+        except QmdError as e:
+            if not was_enabled and not had_projection:
+                if created:
+                    _qmd_remove_collection(d)
+                try:
+                    _qmd_purge_projection(d)
+                except QmdError:
+                    pass
+            die("Could not enable QMD: %s.\n"
+                "No OptMem memory was changed." % e)
+        print("QMD semantic recall is enabled for %s." % pretty(d))
+        print("The first semantic recall will update and embed the projection.")
+        return
+    if command == "rebuild":
+        if rest:
+            die("usage: %s qmd rebuild" % ME)
+        if not qmd_enabled(d):
+            die("QMD is not enabled for this memory. Run: %s qmd enable" % ME)
+        try:
+            _qmd_run(["--version"], timeout=30)
+            _qmd_reset_projection(d)
+            _qmd_sync_projection(d)
+            error = _qmd_remove_collection(d)
+            if error:
+                raise QmdError(error)
+            _qmd_ensure_collection(d)
+            _qmd_index_projection(d)
+        except QmdError as e:
+            die("Could not rebuild QMD: %s.\n"
+                "Raw OptMem memory is intact; retry rebuild later." % e)
+        print("Rebuilt QMD projection and embeddings for %s." % pretty(d))
+        return
+
+    if any(arg != "--purge" for arg in rest) or rest.count("--purge") > 1:
+        die("usage: %s qmd disable [--purge]" % ME)
+    purge = bool(rest)
+    try:
+        os.unlink(_qmd_file(d, "enabled"))
+    except FileNotFoundError:
+        pass
+    except QmdError as e:
+        die("Could not disable QMD: %s." % e)
+    warning = _qmd_remove_collection(d)
+    if purge:
+        try:
+            _qmd_purge_projection(d)
+        except QmdError as e:
+            die("QMD was disabled, but projection purge failed: %s." % e)
+    print("QMD semantic recall is disabled for %s." % pretty(d))
+    print("Removed the derived projection." if purge
+          else "Kept the rebuildable projection; use --purge to remove it.")
+    if warning:
+        print("Could not remove the external QMD collection: %s" % warning)
+    print("Raw OptMem memory was not changed.")
+
+
 def fff_recall(d, query, limit=None):
     """The strongest typo-tolerant matches from LOG.txt, or (None, reason)
     when the optional Python 3.10+ FFF binding is unavailable or failed."""
@@ -1552,7 +1978,7 @@ def _number_option(name, value, low, high):
 
 
 def _recall_args(args):
-    fuzzy, limit, context, query, i = False, None, 0, [], 0
+    fuzzy, semantic, limit, context, query, i = False, False, None, 0, [], 0
     while i < len(args):
         arg = args[i]
         if arg == "--":
@@ -1560,6 +1986,8 @@ def _recall_args(args):
             break
         if arg == "--fuzzy":
             fuzzy = True
+        elif arg == "--semantic":
+            semantic = True
         elif arg in ("--limit", "--context"):
             if i + 1 >= len(args):
                 die("%s needs a number." % arg)
@@ -1582,9 +2010,13 @@ def _recall_args(args):
             query.append(arg)
         i += 1
     if len(query) != 1:
-        die("usage: %s recall [--fuzzy] [--limit N] [--context N] "
-            "<query>" % ME)
-    return fuzzy, limit, context, query[0]
+        die("usage: %s recall [--fuzzy|--semantic] [--limit N] "
+            "[--context N] <query>" % ME)
+    if fuzzy and semantic:
+        die("Use either --fuzzy or --semantic, not both.")
+    if semantic and (limit is not None or context):
+        die("--limit and --context apply to exact/FFF recall, not --semantic.")
+    return fuzzy, semantic, limit, context, query[0]
 
 
 def _memory_id(line):
@@ -1654,8 +2086,94 @@ def _print_fuzzy(d, out, limit, context):
     print("%s (%s)." % (plural(len(selected), "fuzzy match"), detail))
 
 
+def _qmd_result_ids(item, lo, hi, T):
+    """Candidate IDs only; their text is always reread from canonical LOG."""
+    upper = min(hi + 1, T)
+    ids = []
+    material = " ".join(str(item.get(key, ""))
+                        for key in ("snippet", "body"))
+    for value in re.findall(r"(?m)#(\d+)\b", material):
+        i = int(value)
+        if lo <= i < upper and i not in ids:
+            ids.append(i)
+    if not ids and upper > lo:
+        try:
+            line = max(1, int(item.get("line", 1)))
+        except (TypeError, ValueError):
+            line = 1
+        ids.append(min(upper - 1, lo + (line - 1) // 2))
+    return ids[:QMD_MEMORIES_PER_SEGMENT]
+
+
+def _print_semantic(d, query):
+    if not qmd_enabled(d):
+        die("Semantic recall unavailable: QMD is not enabled for this "
+            "memory.\nRun: %s qmd enable\n"
+            "Exact and FFF fuzzy recall are still available." % ME)
+    try:
+        T, _ = _qmd_index_projection(d)
+        raw = _qmd_run([
+            "query", query, "--format", "json", "-n",
+            str(QMD_QUERY_SEGMENTS), "-c", qmd_collection(d),
+        ], timeout=660)
+        payload = json.loads(raw or "[]")
+    except (QmdError, ValueError) as e:
+        die("Semantic recall failed: %s.\n"
+            "Exact and FFF fuzzy recall are still available." % e)
+    if isinstance(payload, dict):
+        payload = payload.get("results")
+    if not isinstance(payload, list):
+        die("Semantic recall failed: qmd returned unexpected JSON.\n"
+            "Exact and FFF fuzzy recall are still available.")
+
+    blocks, memories, seen_ids, seen_blocks = [], 0, set(), set()
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        match = _QMD_RESULT_RE.search(str(item.get("file", "")))
+        if not match:
+            continue
+        lo, hi = map(int, match.groups())
+        if (lo % QMD_SEGMENT_SIZE or
+                hi != lo + QMD_SEGMENT_SIZE - 1 or lo >= T or
+                (lo, hi) in seen_blocks):
+            continue
+        seen_blocks.add((lo, hi))
+        try:
+            score = float(item.get("score", 0))
+        except (TypeError, ValueError):
+            score = 0
+        percent = round(max(0, min(100, score if score > 1 else score * 100)))
+        lines = ["#%d-%d — QMD relevance %d%%" % (lo, hi, percent)]
+        for i in _qmd_result_ids(item, lo, hi, T):
+            if i in seen_ids:
+                continue
+            seen_ids.add(i)
+            lines.append("#%d %s %s" % log_get(d, i))
+            memories += 1
+        if len(lines) > 1:
+            blocks.append(lines)
+        if len(blocks) >= QMD_QUERY_SEGMENTS:
+            break
+    if not blocks:
+        print("No semantic match.")
+        return
+    global_path = os.path.normcase(os.path.realpath(
+        os.path.abspath(os.path.expanduser(GLOBAL))))
+    scope = ("selected" if os.environ.get("MEMORY_DIR") else
+             "global" if os.path.normcase(os.path.realpath(
+                 os.path.abspath(d))) == global_path else "project")
+    print("Semantic matches in %s memory:\n" % scope)
+    print("\n\n".join("\n".join(block) for block in blocks))
+    print("\n%s from %s." % (
+        plural(memories, "likely memory"), plural(len(blocks), "matching block")))
+
+
 def cmd_recall(d, args):
-    fuzzy, limit, context, query = _recall_args(args)
+    fuzzy, semantic, limit, context, query = _recall_args(args)
+    if semantic:
+        _print_semantic(d, query)
+        return
     if fuzzy:
         out, error = fff_recall(d, query, limit)
         if out is None:
@@ -1856,6 +2374,13 @@ def cmd_doctor(d, args):
     print("  Project store: %s [%s]" % (pretty(project), memory_status(project)))
     print("  Global store:  %s [%s]" % (pretty(global_), memory_status(global_)))
     print("  FFF recall:    %s" % fff_status)
+    qmd = _qmd_status(d)
+    print("  QMD executable:   %s" % qmd["executable"])
+    print("  QMD integration: %s" %
+          ("enabled" if qmd["enabled"] else "disabled"))
+    print("  QMD projection:  %s" % qmd["projection"])
+    print("  QMD collection:  %s" % qmd["collection"])
+    print("  QMD embeddings:  %s" % qmd["embeddings"])
     if memory_status(global_) == "not created":
         print()
         print("Next: create global memory with: %s init" % TOOL)
@@ -1867,7 +2392,7 @@ def cmd_doctor(d, args):
 
 COMMANDS = {"init": cmd_init, "setup": cmd_setup,
             "completion": cmd_completion, "upgrade": cmd_upgrade,
-            "uninstall": cmd_uninstall, "wake": cmd_wake,
+            "uninstall": cmd_uninstall, "qmd": cmd_qmd, "wake": cmd_wake,
             "note": cmd_note,
             "nap": cmd_nap, "recall": cmd_recall, "zoom": cmd_zoom,
             "forget": cmd_forget, "config": cmd_config, "import": cmd_import,
@@ -1919,6 +2444,14 @@ def main():
         if cmd == "uninstall":
             cmd_uninstall(None, argv[1:])
             return
+        if cmd == "qmd" and argv[1:] == ["status"]:
+            cmd_qmd(memory_dir(), argv[1:])
+            return
+        if cmd == "recall" and "--semantic" in argv[1:]:
+            _, semantic, _, _, query = _recall_args(argv[1:])
+            if semantic and not qmd_enabled(memory_dir()):
+                _print_semantic(memory_dir(), query)
+                return
         if cmd == "wake" and not SCOPE_GLOBAL and not os.environ.get("MEMORY_DIR"):
             wake_both(argv[1:])
             return

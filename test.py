@@ -7,6 +7,7 @@ Uses a fake compressor (join + truncate) so the run is deterministic and free.
 import contextlib
 import datetime
 import io
+import json
 import os
 import re
 import shutil
@@ -172,7 +173,8 @@ check(helped.returncode == 0 and "Usage:" in helped.stdout
       and "setup [--create|--no-create] [FILE ...]" in helped.stdout
       and "completion <shell>" in helped.stdout
       and "upgrade" in helped.stdout and "uninstall" in helped.stdout
-      and "doctor" in helped.stdout and "recall [options]" in helped.stdout,
+      and "doctor" in helped.stdout and "qmd <command>" in helped.stdout
+      and "recall [options]" in helped.stdout,
       "--help is not a useful command overview:\n" + helped.stdout + helped.stderr)
 help_alias = subprocess.run(memo + ["help"], capture_output=True, text=True,
                             env=fresh)
@@ -193,7 +195,8 @@ for shell, signature in completion_signatures.items():
     check("upgrade" in completed.stdout and "uninstall" in completed.stdout,
           "%s completion omits maintenance commands" % shell)
     check("limit" in completed.stdout and "context" in completed.stdout
-          and "depth" in completed.stdout,
+          and "depth" in completed.stdout and "semantic" in completed.stdout
+          and "qmd" in completed.stdout and "purge" in completed.stdout,
           "%s completion omits recall/zoom controls" % shell)
 bad_completion = subprocess.run(memo + ["completion", "tcsh"],
                                 capture_output=True, text=True, env=fresh)
@@ -218,11 +221,26 @@ diagnosed = subprocess.run(memo + ["doctor"], capture_output=True, text=True,
                            env=fresh)
 check(diagnosed.returncode == 0 and "OptMem doctor" in diagnosed.stdout
       and "Active scope:" in diagnosed.stdout
-      and "Global store:" in diagnosed.stdout and "FFF recall:" in diagnosed.stdout,
+      and "Global store:" in diagnosed.stdout and "FFF recall:" in diagnosed.stdout
+      and "QMD integration:" in diagnosed.stdout,
       "doctor did not explain the installation:\n"
       + diagnosed.stdout + diagnosed.stderr)
 check(not os.path.exists(os.path.join(fresh["HOME"], ".optmem", "memory")),
       "doctor created the missing global store")
+fresh_qmd_status = subprocess.run(
+    memo + ["qmd", "status"], capture_output=True, text=True, env=fresh)
+check(fresh_qmd_status.returncode == 0
+      and "Integration:     disabled" in fresh_qmd_status.stdout
+      and not os.path.exists(os.path.join(fresh["XDG_DATA_HOME"], "optmem")),
+      "qmd status created a project store or failed read-only inspection:\n"
+      + fresh_qmd_status.stdout + fresh_qmd_status.stderr)
+fresh_semantic = subprocess.run(
+    memo + ["recall", "--semantic", "anything"], capture_output=True,
+    text=True, env=fresh)
+check(fresh_semantic.returncode == 1 and "not enabled" in fresh_semantic.stderr
+      and not os.path.exists(os.path.join(fresh["XDG_DATA_HOME"], "optmem")),
+      "disabled semantic recall created a project store:\n"
+      + fresh_semantic.stdout + fresh_semantic.stderr)
 
 # `setup` safely connects common agent instruction files without requiring a
 # memory to exist. It is repeatable, preserves user text, and preflights every
@@ -404,7 +422,9 @@ removed = subprocess.run(
     capture_output=True, text=True, env=maintenance_env)
 check(removed.returncode == 0 and "Preserved global memory" in removed.stdout
       and "Preserved project memories" in removed.stdout
-      and "Agent instruction blocks were not removed" in removed.stdout,
+      and "Agent instruction blocks were not removed" in removed.stdout
+      and "QMD projections and external collections were not removed" in
+          removed.stdout,
       "uninstall failed:\n" + removed.stdout + removed.stderr)
 check(not os.path.exists(installed_memo)
       and not os.path.exists(installed_launcher)
@@ -429,6 +449,7 @@ check("append-only log" in init.stdout
       and "binary tree of lossy one-line" in init.stdout
       and "raw memories remain searchable" in init.stdout
       and "max 280 UTF-8 bytes" in init.stdout
+      and "recall --semantic" in init.stdout
       and "Never record secrets, credentials" in init.stdout,
       "agent instructions do not explain the memory/compression model")
 check("BEGIN OPTMEM AGENT INSTRUCTIONS" in init.stdout
@@ -693,6 +714,254 @@ r = run("recall", "--fuzzy", "anything")
 check(r.returncode == 1 and "pip install fff-search" in r.stderr,
       "forced FFF recall did not explain how to enable it: " + r.stderr)
 cli.fff_recall = real_fff_recall
+
+
+# QMD is an explicitly enabled, disposable semantic index. Projection files
+# contain raw entries, but every result is resolved back through LOG.txt.
+qmd_store = tempfile.mkdtemp(prefix="optmem-qmd-")
+os.makedirs(os.path.join(qmd_store, "TREE"))
+open(os.path.join(qmd_store, "LOG.txt"), "wb").close()
+cli.log_append(qmd_store, [
+    ("2026-07-%02d" % (1 + i // 4), "qmd canonical memory %d" % i)
+    for i in range(35)
+])
+check(not os.path.exists(os.path.join(qmd_store, "QMD")),
+      "a QMD projection appeared before opt-in")
+run("note", "recorded before QMD was enabled", store=qmd_store)
+check(not os.path.exists(os.path.join(qmd_store, "QMD")),
+      "memo note touched QMD while the integration was disabled")
+
+real_qmd_run = cli._qmd_run
+qmd_calls, qmd_collections = [], set()
+qmd_fail_query = [False]
+qmd_fail_embed = [False]
+
+
+def fake_qmd_run(args, timeout=120):
+    args = list(args)
+    qmd_calls.append((args, timeout))
+    if args == ["--version"]:
+        return "qmd 2.6.3"
+    if args[:2] == ["collection", "show"]:
+        if args[2] not in qmd_collections:
+            raise cli.QmdError("Collection not found: " + args[2])
+        return "Collection: %s\n  Path:     %s" % (args[2], cli.qmd_dir(qmd_store))
+    if args[:2] == ["collection", "add"]:
+        qmd_collections.add(args[args.index("--name") + 1])
+        return "created"
+    if args[:2] == ["collection", "remove"]:
+        qmd_collections.discard(args[2])
+        return "removed"
+    if args and args[0] == "embed" and qmd_fail_embed[0]:
+        raise cli.QmdError("embedding interrupted")
+    if args and args[0] in ("context", "update", "embed"):
+        return "ok"
+    if args and args[0] == "query":
+        if qmd_fail_query[0]:
+            raise cli.QmdError("model temporarily unavailable")
+        collection = cli.qmd_collection(qmd_store)
+        return json.dumps([
+            {
+                "file": "qmd://%s/00000016-00000031.md?index=optmem"
+                        % collection,
+                "score": 0.82,
+                "line": 5,
+                "snippet": "#18 text supplied by QMD must not be trusted",
+            },
+            {
+                "file": "qmd://%s/00000032-00000047.md?index=optmem"
+                        % collection,
+                "score": 0.61,
+                "line": 7,
+                "snippet": "#35 another untrusted projection snippet",
+            },
+        ])
+    raise cli.QmdError("unexpected fake qmd call: %r" % args)
+
+
+cli._qmd_run = fake_qmd_run
+enabled = run("qmd", "enable", store=qmd_store)
+check(enabled.returncode == 0 and "enabled" in enabled.stdout,
+      "memo qmd enable failed: " + enabled.stdout + enabled.stderr)
+projection = os.path.join(qmd_store, "QMD")
+segments = sorted(name for name in os.listdir(projection)
+                  if name.endswith(".md"))
+check(segments == ["00000000-00000015.md", "00000016-00000031.md",
+                   "00000032-00000047.md"],
+      "QMD did not create fixed 16-memory segments: %r" % segments)
+with open(os.path.join(projection, "state"), encoding="utf-8") as f:
+    qmd_state = json.load(f)
+check(qmd_state == {"format": 1, "logRecords": 36, "segmentSize": 16},
+      "QMD projection state is not minimal and deterministic: %r" % qmd_state)
+first_segment = open(os.path.join(projection, segments[0]),
+                     encoding="utf-8").read()
+check(first_segment.startswith("#0 2026-07-01 qmd canonical memory 0\n\n")
+      and "#15 " in first_segment and "\x00" not in first_segment,
+      "QMD segment is not an unchanged logical projection of raw entries")
+
+completed_before = {
+    name: open(os.path.join(projection, name), "rb").read()
+    for name in segments[:2]
+}
+partial_path = os.path.join(projection, segments[2])
+partial_before = open(partial_path, "rb").read()
+run("note", "appended lazily after QMD enable", store=qmd_store)
+check(open(partial_path, "rb").read() == partial_before,
+      "memo note synchronously rewrote the QMD projection")
+
+qmd_calls.clear()
+semantic = run("recall", "--semantic", "why did policy change?",
+               store=qmd_store)
+check(semantic.returncode == 0
+      and "Semantic matches in selected memory" in semantic.stdout
+      and "#18 2026-07-05 qmd canonical memory 18" in semantic.stdout
+      and "#35 " in semantic.stdout
+      and "text supplied by QMD must not be trusted" not in semantic.stdout,
+      "semantic recall did not resolve QMD hits through canonical LOG.txt:\n"
+      + semantic.stdout + semantic.stderr)
+called_commands = [call[0][0] for call in qmd_calls]
+check("update" in called_commands and "embed" in called_commands
+      and "query" in called_commands,
+      "semantic recall did not lazily update, embed, and query: %r" % qmd_calls)
+check(all(open(os.path.join(projection, name), "rb").read() ==
+          completed_before[name] for name in segments[:2])
+      and b"appended lazily after QMD enable" in open(partial_path, "rb").read(),
+      "lazy sync changed a completed segment or missed the partial segment")
+check(not os.path.exists(os.path.join(projection, "dirty")),
+      "successful QMD synchronization left its retry marker behind")
+
+qmd_calls.clear()
+semantic_again = run("recall", "--semantic", "policy", store=qmd_store)
+called_commands = [call[0][0] for call in qmd_calls]
+check(semantic_again.returncode == 0 and called_commands.count("query") == 1
+      and "update" not in called_commands and "embed" not in called_commands,
+      "an unchanged projection was unnecessarily re-indexed: %r" % qmd_calls)
+
+run("note", "forces an interrupted QMD embedding retry", store=qmd_store)
+qmd_fail_embed[0] = True
+interrupted_sync = run("recall", "--semantic", "policy", store=qmd_store)
+qmd_fail_embed[0] = False
+check(interrupted_sync.returncode == 1
+      and os.path.exists(os.path.join(projection, "dirty")),
+      "an interrupted embedding lost the QMD dirty retry marker")
+qmd_calls.clear()
+retried_sync = run("recall", "--semantic", "policy", store=qmd_store)
+check(retried_sync.returncode == 0
+      and any(call[0][0] == "update" for call in qmd_calls)
+      and any(call[0][0] == "embed" for call in qmd_calls)
+      and not os.path.exists(os.path.join(projection, "dirty")),
+      "semantic recall did not retry an interrupted QMD synchronization")
+
+qmd_fail_query[0] = True
+failed_semantic = run("recall", "--semantic", "policy", store=qmd_store)
+qmd_fail_query[0] = False
+check(failed_semantic.returncode == 1
+      and "Semantic recall failed" in failed_semantic.stderr
+      and "Exact and FFF fuzzy recall are still available" in
+          failed_semantic.stderr,
+      "a QMD failure was not isolated and actionable:\n"
+      + failed_semantic.stdout + failed_semantic.stderr)
+check("qmd canonical memory 18" in
+      run("recall", "canonical memory 18", store=qmd_store).stdout,
+      "QMD failure damaged ordinary exact recall")
+qmd_calls.clear()
+ordinary_recall = run("recall", "canonical memory 18", store=qmd_store)
+check(ordinary_recall.returncode == 0 and not qmd_calls,
+      "ordinary recall invoked QMD while semantic mode was not requested")
+check(run("recall", "--fuzzy", "--semantic", "x",
+          store=qmd_store).returncode == 1,
+      "recall accepted conflicting fuzzy and semantic modes")
+check(run("recall", "--semantic", "--limit", "2", "x",
+          store=qmd_store).returncode == 1,
+      "semantic recall silently accepted exact-recall controls")
+
+# Restoring an older backup removes impossible trailing segments and rewrites
+# only the now-current partial segment.
+with cli.locked(qmd_store):
+    with open(os.path.join(qmd_store, "LOG.txt"), "r+b") as f:
+        f.truncate(20 * cli.LOG_REC)
+changed, qmd_records, qmd_segment_count = cli._qmd_sync_projection(qmd_store)
+check(changed and qmd_records == 20 and qmd_segment_count == 2
+      and sorted(name for name in os.listdir(projection)
+                 if name.endswith(".md")) ==
+          ["00000000-00000015.md", "00000016-00000031.md"],
+      "QMD projection did not recover from an older restored log")
+restored_log = open(os.path.join(qmd_store, "LOG.txt"), "rb").read()
+
+qmd_calls.clear()
+rebuilt = run("qmd", "rebuild", store=qmd_store)
+check(rebuilt.returncode == 0 and "Rebuilt" in rebuilt.stdout
+      and any(call[0][:2] == ["collection", "remove"] for call in qmd_calls)
+      and any(call[0][:2] == ["collection", "add"] for call in qmd_calls)
+      and any(call[0][0] == "embed" for call in qmd_calls),
+      "memo qmd rebuild did not recreate the derived collection:\n"
+      + rebuilt.stdout + rebuilt.stderr + repr(qmd_calls))
+
+disabled = run("qmd", "disable", store=qmd_store)
+check(disabled.returncode == 0 and "disabled" in disabled.stdout
+      and os.path.isdir(projection)
+      and not os.path.exists(os.path.join(projection, "enabled")),
+      "qmd disable did not retain the disposable projection")
+disabled_semantic = run("recall", "--semantic", "policy", store=qmd_store)
+check(disabled_semantic.returncode == 1
+      and "not enabled" in disabled_semantic.stderr,
+      "semantic recall ran while QMD was disabled")
+qmd_status = run("qmd", "status", store=qmd_store)
+check(qmd_status.returncode == 0 and "Integration:     disabled" in
+      qmd_status.stdout and "qmd 2.6.3" in qmd_status.stdout,
+      "memo qmd status did not explain disabled retained state:\n"
+      + qmd_status.stdout + qmd_status.stderr)
+
+cli._qmd_run = lambda args, timeout=120: (
+    (_ for _ in ()).throw(cli.QmdError("qmd temporarily unavailable")))
+failed_reenable = run("qmd", "enable", store=qmd_store)
+check(failed_reenable.returncode == 1 and os.path.isdir(projection),
+      "a failed re-enable deleted the retained disposable projection")
+cli._qmd_run = fake_qmd_run
+run("qmd", "enable", store=qmd_store)
+purged = run("qmd", "disable", "--purge", store=qmd_store)
+check(purged.returncode == 0 and "Removed the derived projection" in
+      purged.stdout and not os.path.exists(projection),
+      "qmd disable --purge left derived projection data")
+cli._qmd_run = lambda args, timeout=120: (
+    (_ for _ in ()).throw(cli.QmdError("qmd is not installed")))
+missing_qmd = run("qmd", "enable", store=qmd_store)
+check(missing_qmd.returncode == 1 and "Could not enable QMD" in
+      missing_qmd.stderr and not os.path.exists(projection),
+      "failed QMD enable created files or changed memory")
+check(open(os.path.join(qmd_store, "LOG.txt"), "rb").read() == restored_log,
+      "QMD rebuild, disable, or purge changed authoritative LOG.txt")
+cli._qmd_run = real_qmd_run
+
+# The real subprocess boundary always uses a named index, no shell, JSON-safe
+# UTF-8, no color, and a finite timeout.
+captured_qmd = {}
+real_subprocess_run, real_which = cli.subprocess.run, cli.shutil.which
+
+
+class FakeQmdProcess:
+    returncode, stdout, stderr = 0, "[]", ""
+
+
+def capture_qmd_process(command, **kwargs):
+    captured_qmd["command"], captured_qmd["kwargs"] = command, kwargs
+    return FakeQmdProcess()
+
+
+try:
+    cli.subprocess.run = capture_qmd_process
+    cli.shutil.which = lambda name: "qmd-test" if name == "qmd" else None
+    check(cli._qmd_run(["query", "meaning"], timeout=17) == "[]",
+          "QMD subprocess adapter did not return stdout")
+finally:
+    cli.subprocess.run, cli.shutil.which = real_subprocess_run, real_which
+    cli._qmd_run = real_qmd_run
+check(captured_qmd.get("command")[:3] ==
+      ["qmd-test", "--index", "optmem"]
+      and captured_qmd["kwargs"].get("shell") is False
+      and captured_qmd["kwargs"].get("timeout") == 17
+      and captured_qmd["kwargs"]["env"].get("NO_COLOR") == "1",
+      "QMD subprocess boundary is not isolated: %r" % captured_qmd)
 
 
 # zoom: one tree node, opened into its two halves. The tool only reads;
@@ -1090,6 +1359,7 @@ shutil.rmtree(setup_dir)
 shutil.rmtree(fresh["HOME"])
 shutil.rmtree(xdg)
 shutil.rmtree(d2)
+shutil.rmtree(qmd_store)
 shutil.rmtree(d)
 print("\n%d passed, %d failed" % (ok, fail))
 sys.exit(1 if fail else 0)
