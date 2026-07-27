@@ -34,9 +34,35 @@ chmod +x "$DIR/memo"
 trap - EXIT HUP INT TERM
 
 echo "Installed OptMem at $DIR/memo"
-case ":${PATH:-}:" in
-  *":$DIR:"*) echo "The memo command is available on PATH." ;;
-  *) echo "PATH is optional; add $DIR if you want to type 'memo' directly." ;;
+
+# Make `memo` available in future interactive shells. Choose the startup file
+# for the user's configured shell; the installer itself may be running under
+# plain sh because it is commonly invoked through `curl | sh`.
+SHELL_NAME=${SHELL:-}
+SHELL_NAME=${SHELL_NAME##*/}
+case "$SHELL_NAME" in
+  zsh)  PROFILE="$HOME/.zshrc" ;;
+  bash) PROFILE="$HOME/.bashrc" ;;
+  fish)
+    PROFILE="$HOME/.config/fish/config.fish"
+    mkdir -p "$HOME/.config/fish"
+    ;;
+  *) PROFILE="$HOME/.profile" ;;
 esac
+case "$SHELL_NAME" in
+  fish) PATH_LINE='fish_add_path -g "$HOME/.optmem"' ;;
+  *)    PATH_LINE='export PATH="$HOME/.optmem:$PATH"' ;;
+esac
+if [ -f "$PROFILE" ] && grep -F "$PATH_LINE" "$PROFILE" >/dev/null 2>&1; then
+  echo "The memo command is already configured on PATH in $PROFILE."
+else
+  printf '\n# OptMem command\n%s\n' "$PATH_LINE" >> "$PROFILE"
+  echo "Added the memo command to PATH in $PROFILE."
+fi
+case ":${PATH:-}:" in
+  *":$DIR:"*) ;;
+  *) PATH="$DIR:${PATH:-}"; export PATH ;;
+esac
+echo "Open a new shell to use 'memo', or run: export PATH=\"\$HOME/.optmem:\$PATH\""
 echo
 "$DIR/memo" init

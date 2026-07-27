@@ -58,6 +58,8 @@ Please preserve these unless a change explicitly redesigns them:
 - Concurrent writers must receive unique IDs without losing records.
 - Re-running `memo init` or either installer must preserve memory data and
   user configuration.
+- Installers must add the canonical `memo` command to user PATH idempotently
+  and keep an immediately runnable full-path fallback.
 - `memo setup` must preserve non-OptMem instructions, remain byte-for-byte
   idempotent when current, skip missing files unless `--create` is explicit,
   and preflight every target before writing.

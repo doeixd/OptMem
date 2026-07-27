@@ -31,10 +31,12 @@ curl -fsSL https://raw.githubusercontent.com/doeixd/OptMem/main/install.sh | sh
 irm https://raw.githubusercontent.com/doeixd/OptMem/main/install.ps1 | iex
 ```
 
-The installer validates the download, installs the tool under `~/.optmem`, and
-creates the global store without touching existing memories. It then prints a
-block between `BEGIN OPTMEM AGENT INSTRUCTIONS` and
-`END OPTMEM AGENT INSTRUCTIONS`.
+The installer validates the download, installs the tool under `~/.optmem`,
+adds the `memo` command to your user PATH, and creates the global store
+without touching existing memories. It then prints a block between
+`BEGIN OPTMEM AGENT INSTRUCTIONS` and
+`END OPTMEM AGENT INSTRUCTIONS`. Open a new Unix shell after installation;
+the PowerShell installer updates the current session immediately.
 
 ## Setup
 
@@ -75,8 +77,8 @@ agent's persistent instruction file. Existing hand-copied blocks are detected
 and are never duplicated.
 
 Start a new agent session inside the project after connecting the files.
-Adding `~/.optmem` to `PATH` is optional. Generated agent instructions use the
-full executable path, so they work immediately.
+Generated agent instructions still use the full executable path, so they work
+even before a new shell picks up PATH changes.
 
 <details>
 <summary>Review the installer before running it</summary>
@@ -237,9 +239,9 @@ agent may be writing.
 
 ## Update, troubleshoot, and remove
 
-Re-run the installer to update. It replaces only the tool (and the Windows
-launcher), then runs the idempotent `memo init`; existing logs, summaries, and
-configuration remain untouched.
+Re-run the installer to update. It idempotently keeps `memo` on your user
+PATH, replaces only the tool (and the Windows launcher), then runs `memo init`;
+existing logs, summaries, and configuration remain untouched.
 
 Start troubleshooting with:
 
@@ -250,8 +252,9 @@ memo --help
 
 Common fixes:
 
-- `memo: command not found`: use `~/.optmem/memo`, or add `~/.optmem` to
-  `PATH`. On Windows use `& "$HOME\.optmem\memo.cmd"`.
+- `memo: command not found`: open a new shell after installing. You can use
+  `~/.optmem/memo` immediately; on Windows use
+  `& "$HOME\.optmem\memo.cmd"`.
 - The wrong project memory appears: run `memo doctor` and check the current
   directory and Git origin.
 - No global memory exists: run `memo init`.
@@ -261,8 +264,9 @@ Common fixes:
   the intended existing store.
 
 To remove the executable while preserving all memories, delete only
-`~/.optmem/memo` and, on Windows, `~/.optmem/memo.cmd`. The global store lives
-at `~/.optmem/memory`; project stores live under
+`~/.optmem/memo` and, on Windows, `~/.optmem/memo.cmd`, then remove
+`~/.optmem` from your PATH or shell startup file. The global store lives at
+`~/.optmem/memory`; project stores live under
 `${XDG_DATA_HOME:-~/.local/share}/optmem`. Back them up before deleting any
 memory data.
 

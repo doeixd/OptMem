@@ -46,11 +46,38 @@ try {
 }
 
 Write-Host "Installed OptMem at $Launcher"
-$OnPath = ($env:Path -split ';') -contains $InstallDir
-if ($OnPath) {
-    Write-Host 'The memo command is available on PATH.'
-} else {
-    Write-Host "PATH is optional; add $InstallDir if you want to type 'memo' directly."
+$Comparison = [System.StringComparison]::OrdinalIgnoreCase
+$NormalizedInstallDir = $InstallDir.TrimEnd('\')
+$UserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+$UserParts = @($UserPath -split ';' | Where-Object { $_ })
+$OnUserPath = $false
+foreach ($Part in $UserParts) {
+    if ([string]::Equals($Part.Trim().TrimEnd('\'), $NormalizedInstallDir, $Comparison)) {
+        $OnUserPath = $true
+        break
+    }
 }
+if (-not $OnUserPath) {
+    $NewUserPath = if ([string]::IsNullOrWhiteSpace($UserPath)) {
+        $InstallDir
+    } else {
+        "$($UserPath.TrimEnd(';'));$InstallDir"
+    }
+    [Environment]::SetEnvironmentVariable('Path', $NewUserPath, 'User')
+    Write-Host 'Added the memo command to your user PATH.'
+} else {
+    Write-Host 'The memo command is already configured on your user PATH.'
+}
+$OnProcessPath = $false
+foreach ($Part in @($env:Path -split ';' | Where-Object { $_ })) {
+    if ([string]::Equals($Part.Trim().TrimEnd('\'), $NormalizedInstallDir, $Comparison)) {
+        $OnProcessPath = $true
+        break
+    }
+}
+if (-not $OnProcessPath) {
+    $env:Path = "$InstallDir;$env:Path"
+}
+Write-Host "The 'memo' command is available in this PowerShell session."
 Write-Host ''
 & $Launcher init
