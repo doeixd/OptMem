@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.1 — 2026-07-27
+
+### Agent guidance
+
+- Updated the managed agent instruction block and README reference to describe
+  automatic project selection, `MEMORY_DIR` overrides, append-first redaction
+  semantics, and case-insensitive regex recall accurately.
+- Clarified that agents must finish paginated wake output and every printed
+  compression before continuing, including compression printed after the
+  awake line.
+- Made the parent agent explicitly responsible for recording durable outcomes
+  returned by subagents.
+
 ## 1.1.0 — 2026-07-27
 
 ### Automatic project scope

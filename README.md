@@ -495,17 +495,17 @@ Developing or contributing? See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Agent instruction block (reference)
 
-`memo setup` writes the authoritative block with a fully qualified executable
-path. The shorter PATH-based form is shown here for readability; use the
-command or copy the version printed by `memo init` rather than hand-editing
-this example.
+`memo setup` writes the authoritative block between managed markers, using a
+fully qualified executable path. This reference omits those markers and uses
+the shorter PATH-based command for readability. Run `memo setup` (or copy the
+version printed by `memo init`) instead of hand-editing this example.
 
 ```markdown
 ## Memory
 
 Your memory is OptMem:
 - The tool is `memo`
-- Every project you work in has its own memory
+- Each automatically detected project has its own memory
 - One global memory, `~/.optmem/memory`, follows you into all of them
 
 OptMem outlives every session, compaction, model and vendor change.
@@ -513,7 +513,7 @@ Without it you do not know who you are, or what was decided and tried.
 
 ### Mental model
 
-Each scope is an append-only log. `note` adds one raw memory with a stable
+Each scope is an append-first log. `note` adds one raw memory with a stable
 `#ID`; raw memories remain the source of truth. Later memories may cite earlier
 `#IDs` when that makes a durable fact or decision unambiguous. `amend` appends a
 corrected replacement; `retract` appends that an earlier memory is no longer
@@ -527,8 +527,10 @@ with coarser summaries for older history and finer detail toward the present.
 ### At startup: activating OptMem (mandatory)
 
 Run `memo wake` before any other tool call, in every session, and
-then do exactly what it prints, to the end of its output. It reads the
-global memory first, then the memory of the project you are in.
+then do exactly what it prints, through the end of its output. Read every
+continuation until it says `You are awake.` and run any compression command it
+prints before your next action. Without a `MEMORY_DIR` override, `wake` reads
+the global memory first, then the automatically selected project.
 If the selected project is ever unclear, `memo scope` reports the identity,
 store, and detection source without changing memory.
 
@@ -539,12 +541,12 @@ something durable enough to change future work. That covers the outcome
 of a task worth real effort, a decision or constraint, a fact or insight
 the user teaches you, or a preference they would reasonably expect retained.
 
-That writes to the memory of the project you are in, which is where
-almost everything belongs. Add `--global` ONLY if the memory would still
-be true tomorrow in a repository you have never seen: who the user is,
-how they want to be worked with, this machine, your own tooling. How one
-project does something is not global, however much it feels like a
-lesson -- write it to that project.
+That writes to the automatically selected project memory by default, which is
+where almost everything belongs. Add `--global` ONLY if the memory would still
+be true tomorrow in a repository you have never seen: who the user is, how they
+want to be worked with, this machine, your own tooling. How one project does
+something is not global, however much it feels like a lesson -- write it to
+that project. A `MEMORY_DIR` override intentionally pins commands to one store.
 
 Do not register redundant memories. Never record secrets, credentials,
 authentication material, or raw sensitive data.
@@ -572,12 +574,14 @@ Never edit or delete a memory directory: the tool manages it.
 
 ### When you need an old memory: search, or navigate
 
-`memo recall <regex>` searches raw memories, word for word and, when
-`fff-search` is installed, retries a zero-result search fuzzily. Use
+`memo recall <regex>` searches the complete raw log with a case-insensitive
+regular expression and, when `fff-search` is installed, retries a zero-result
+search fuzzily. Use
 `memo recall --fuzzy "<text>"` to request typo-tolerant FFF recall
-directly. Add `--limit N` to cap matched entries and `--context N` to
-include neighboring raw memories; neither makes the search less complete.
-Recall and `zoom` read the project memory; put `--global` first for global.
+directly. Add `--limit N` to cap returned matches and `--context N` to
+include neighboring raw memories; these control output without reducing the
+history searched. Recall and `zoom` target project memory by default; put
+`--global` before the command for global memory.
 If QMD was explicitly enabled for this scope, use
 `memo recall --semantic "<meaning>"` for meaning-based raw-memory recall;
 add `--fast` to skip reranking for repeated related searches. QMD can also be
@@ -594,4 +598,5 @@ Parallel sessions on this machine are all you, and may all write memories.
 A subagent is not: it must never run `memo`, because it cannot judge what
 is already known, and its notes would arrive duplicated and incorrectly.
 When you spawn one, write: `You are a subagent. Don't run memo.`
+The parent agent remains responsible for recording the durable outcome.
 ```

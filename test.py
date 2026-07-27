@@ -527,7 +527,7 @@ check(noenv.returncode == 0 and "No global memory yet" in noenv.stdout
 init = subprocess.run(memo + ["init"], capture_output=True, text=True, env=fresh)
 check(init.returncode == 0 and "## Memory" in init.stdout
       and "You are a" in init.stdout, "init must print the AGENTS.md block")
-check("append-only log" in init.stdout
+check("append-first log" in init.stdout
       and "binary tree of lossy one-line" in init.stdout
       and "raw memories remain searchable" in init.stdout
       and "max 280 UTF-8 bytes" in init.stdout
