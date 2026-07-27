@@ -403,7 +403,8 @@ removed = subprocess.run(
     [sys.executable, installed_memo, "uninstall"],
     capture_output=True, text=True, env=maintenance_env)
 check(removed.returncode == 0 and "Preserved global memory" in removed.stdout
-      and "Preserved project memories" in removed.stdout,
+      and "Preserved project memories" in removed.stdout
+      and "Agent instruction blocks were not removed" in removed.stdout,
       "uninstall failed:\n" + removed.stdout + removed.stderr)
 check(not os.path.exists(installed_memo)
       and not os.path.exists(installed_launcher)
@@ -426,7 +427,9 @@ check(init.returncode == 0 and "## Memory" in init.stdout
       and "You are a" in init.stdout, "init must print the AGENTS.md block")
 check("append-only log" in init.stdout
       and "binary tree of lossy one-line" in init.stdout
-      and "raw memories remain searchable" in init.stdout,
+      and "raw memories remain searchable" in init.stdout
+      and "max 280 UTF-8 bytes" in init.stdout
+      and "Never record secrets, credentials" in init.stdout,
       "agent instructions do not explain the memory/compression model")
 check("BEGIN OPTMEM AGENT INSTRUCTIONS" in init.stdout
       and "END OPTMEM AGENT INSTRUCTIONS" in init.stdout
@@ -441,6 +444,11 @@ check(global_doctor.returncode == 0
       and "Active store:" in global_doctor.stdout,
       "--global doctor did not diagnose the global store:\n"
       + global_doctor.stdout + global_doctor.stderr)
+if "On PATH:       no" in global_doctor.stdout:
+    check("PATH is not active in this shell; open a new shell" in
+          global_doctor.stdout,
+          "doctor did not explain how to recover a missing PATH:\n"
+          + global_doctor.stdout)
 override_dir = os.path.join(fresh["HOME"], "missing-explicit-store")
 override_doctor = subprocess.run(
     memo + ["doctor"], capture_output=True, text=True,
@@ -564,6 +572,7 @@ r = run("nap")
 check("Compress memories #" in r.stdout, "nap prompt must name its object")
 check("self-contained retrieval cue" in r.stdout
       and "causal links" in r.stdout
+      and "UTF-8 bytes" in r.stdout
       and "never imply a link between unrelated facts" in r.stdout,
       "nap prompt does not give enough compression guidance")
 while "Nothing left to compress" not in r.stdout:
@@ -843,7 +852,8 @@ for T in list(range(1, 40)) + [T0 - 1, T0, T0 + 1]:
 # recall must not hand back more than a harness will carry
 r = run("recall", "memory number")
 check(len(r.stdout) < CAP_CHARS, "recall returned %d chars" % len(r.stdout))
-check("Narrow the regex" in r.stdout, "recall did not say it had been capped")
+check("(output cap)" in r.stdout and "Narrow the regex" in r.stdout,
+      "recall did not explain its output cap")
 
 # ---- concurrency and crash recovery ----------------------------------
 

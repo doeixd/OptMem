@@ -11,14 +11,14 @@ block to both common instruction files:
 
 ```sh
 cd /path/to/project
-~/.optmem/memo setup --create
+memo setup --create
 ```
 
 On Windows PowerShell:
 
 ```powershell
 Set-Location C:\path\to\project
-& "$HOME\.optmem\memo.cmd" setup --create
+memo setup --create
 ```
 
 The explicit `--create` permits missing `AGENTS.md` and `CLAUDE.md` files to
@@ -33,7 +33,7 @@ updates only the managed block when OptMem's instructions change.
 Pass one or more paths to target different files:
 
 ```sh
-~/.optmem/memo setup AGENTS.md .github/agent-instructions.md
+memo setup AGENTS.md .github/agent-instructions.md
 ```
 
 Add `--create` if any explicit target does not exist yet.
@@ -64,7 +64,7 @@ contains the executable path that works on your platform.
 From the project where the agent will work:
 
 ```sh
-~/.optmem/memo doctor
+memo doctor
 ```
 
 Check that:
@@ -112,7 +112,7 @@ Do not record:
 
 - temporary progress such as “currently editing file X”;
 - guesses that have not been verified;
-- secrets, tokens, passwords, or private keys;
+- secrets, credentials, authentication material, or raw sensitive data;
 - raw command output that can be reproduced cheaply;
 - a fact already represented by an existing memory.
 

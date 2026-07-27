@@ -166,7 +166,7 @@ directory. Run `memo doctor` whenever the selected scope is surprising.
 | `memo uninstall` | remove the command and shell integration while preserving every memory |
 | `memo doctor` | explain the active scope, store paths, Python, PATH, Git origin, and FFF availability |
 | `memo wake` | read both memories — global, then project; first command of every session |
-| `memo note "..."` | record one memory: one line, up to 280 chars (project by default) |
+| `memo note "..."` | record one memory: one line, up to 280 UTF-8 bytes (project by default) |
 | `memo nap` | answer the merges that came due |
 | `memo recall [--limit N] [--context N] <regex>` | search the complete raw log while controlling matches and neighboring entries |
 | `memo recall --fuzzy [--limit N] [--context N] "<text>"` | typo-tolerant raw-memory search with optional FFF |
@@ -308,8 +308,10 @@ memo uninstall
 Uninstall deliberately preserves the global store at `~/.optmem/memory` and
 all project stores under `${XDG_DATA_HOME:-~/.local/share}/optmem`, so
 reinstalling restores access to the same history. Open a new shell afterward
-to discard the old process PATH. Delete memory directories manually only when
-you intentionally want to erase that data.
+to discard the old process PATH. It also leaves managed blocks in connected
+`AGENTS.md`, `CLAUDE.md`, and other instruction files; remove those blocks
+manually if you are permanently retiring OptMem. Delete memory directories
+manually only when you intentionally want to erase that data.
 
 Start troubleshooting with:
 
@@ -367,10 +369,10 @@ global memory first, then the memory of the project you are in.
 
 ### While working: register memories (mandatory)
 
-Call `memo note "<1 line, max 280 chars>"` whenever you learn
-something new, or something worth keeping happens. That covers a task
-worth real effort, a fact or insight the user teaches you, anything you
-learn about their life (even indirectly), any event of lasting effect.
+Call `memo note "<1 line, max 280 UTF-8 bytes>"` whenever you learn
+something durable enough to change future work. That covers the outcome
+of a task worth real effort, a decision or constraint, a fact or insight
+the user teaches you, or a preference they would reasonably expect retained.
 
 That writes to the memory of the project you are in, which is where
 almost everything belongs. Add `--global` ONLY if the memory would still
@@ -379,7 +381,8 @@ how they want to be worked with, this machine, your own tooling. How one
 project does something is not global, however much it feels like a
 lesson -- write it to that project.
 
-Do not register redundant memories.
+Do not register redundant memories. Never record secrets, credentials,
+authentication material, or raw sensitive data.
 
 If `memo note` asks a compression, follow its prompt and run the exact
 `nap` command before your next action.

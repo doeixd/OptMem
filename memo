@@ -565,7 +565,7 @@ def nap_prompt(d, lo, hi, left):
     tail = "" if not left else "\n%s after this one." % (
         "1 compression remains" if left == 1 else
         "%d compressions remain" % left)
-    return ("Compress memories #%d-%d into one line of at most %d characters.\n"
+    return ("Compress memories #%d-%d into one line of at most %d UTF-8 bytes.\n"
             "Make it a self-contained retrieval cue. Preserve durable "
             "decisions, outcomes, constraints, causal links, and useful "
             "failure reasons. Drop transient status, incidental chronology, and "
@@ -614,10 +614,10 @@ global memory first, then the memory of the project you are in.
 
 ### While working: register memories (mandatory)
 
-Call `{memo} note "<1 line, max {chars} chars>"` whenever you learn
-something new, or something worth keeping happens. That covers a task
-worth real effort, a fact or insight the user teaches you, anything you
-learn about their life (even indirectly), any event of lasting effect.
+Call `{memo} note "<1 line, max {chars} UTF-8 bytes>"` whenever you learn
+something durable enough to change future work. That covers the outcome
+of a task worth real effort, a decision or constraint, a fact or insight
+the user teaches you, or a preference they would reasonably expect retained.
 
 That writes to the memory of the project you are in, which is where
 almost everything belongs. Add `--global` ONLY if the memory would still
@@ -626,7 +626,8 @@ how they want to be worked with, this machine, your own tooling. How one
 project does something is not global, however much it feels like a
 lesson -- write it to that project.
 
-Do not register redundant memories.
+Do not register redundant memories. Never record secrets, credentials,
+authentication material, or raw sensitive data.
 
 If `{memo} note` asks a compression, follow its prompt and run the exact
 `nap` command before your next action.
@@ -1266,6 +1267,8 @@ def cmd_uninstall(d, args):
     print("Preserved global memory: %s" %
           pretty(os.path.join(install, "memory")))
     print("Preserved project memories: %s" % pretty(project_root))
+    print("Agent instruction blocks were not removed. If retiring OptMem,")
+    print("remove its OPTMEM:START/END block from connected instruction files.")
     print("Open a new shell to finish removing memo from the current PATH.")
 
 
@@ -1627,6 +1630,7 @@ def _output_size(lines):
 def _fit_context(d, matches, radius, ranked):
     """Drop least useful matches until their deduplicated context fits."""
     matches = deque(matches)
+    original = len(matches)
     rendered = _context_output(d, matches, radius, ranked)
     while len(matches) > 1 and _output_size(rendered) > PART_CHARS:
         if ranked:
@@ -1634,16 +1638,19 @@ def _fit_context(d, matches, radius, ranked):
         else:
             matches.popleft()   # oldest exact match
         rendered = _context_output(d, matches, radius, ranked)
-    return list(matches), rendered
+    return list(matches), rendered, len(matches) < original
 
 
 def _print_fuzzy(d, out, limit, context):
     selected = list(out[:limit] if limit is not None else out)
-    selected, rendered = _fit_context(d, selected, context, ranked=True)
+    selected, rendered, output_trimmed = _fit_context(
+        d, selected, context, ranked=True)
     print("\n".join(rendered))
     detail = "FFF, strongest first"
     if context:
         detail += "; context deduplicated, matches marked >"
+    if output_trimmed:
+        detail += "; output capped"
     print("%s (%s)." % (plural(len(selected), "fuzzy match"), detail))
 
 
@@ -1667,6 +1674,7 @@ def cmd_recall(d, args):
     # respects -- a vague regex matches the whole log, and the whole log does
     # not fit in a harness's output or in memory.
     hits, out, size = 0, deque(), 0
+    limit_trimmed = output_trimmed = False
     for e in log_scan(d):
         line = "#%d %s %s" % e
         if not pat.search(line):
@@ -1674,8 +1682,11 @@ def cmd_recall(d, args):
         hits += 1
         out.append(line)
         size += len(line.encode()) + 1
-        while ((limit is not None and len(out) > limit) or
-               size > PART_CHARS):
+        while limit is not None and len(out) > limit:
+            limit_trimmed = True
+            size -= len(out.popleft().encode()) + 1
+        while size > PART_CHARS:
+            output_trimmed = True
             size -= len(out.popleft().encode()) + 1
     if not hits:
         fuzzy_out, _ = fff_recall(d, query, limit)
@@ -1685,10 +1696,16 @@ def cmd_recall(d, args):
             return
         print("No match.")
         return
-    selected, rendered = _fit_context(d, out, context, ranked=False)
+    selected, rendered, context_trimmed = _fit_context(
+        d, out, context, ranked=False)
     print("\n".join(rendered))
     if len(selected) < hits:
-        reason = " (--limit %d/output cap)" % limit if limit else ""
+        reasons = []
+        if limit_trimmed:
+            reasons.append("--limit %d" % limit)
+        if output_trimmed or context_trimmed:
+            reasons.append("output cap")
+        reason = " (%s)" % "; ".join(reasons) if reasons else ""
         print("Newest %d of %s%s. Narrow the regex or adjust --limit."
               % (len(selected), plural(hits, "match"), reason))
     else:
@@ -1844,8 +1861,8 @@ def cmd_doctor(d, args):
         print("Next: create global memory with: %s init" % TOOL)
     elif not on_path:
         print()
-        print("Ready. PATH is optional; the generated agent instructions use")
-        print("the tool's full path.")
+        print("Ready. PATH is not active in this shell; open a new shell or")
+        print("use the full path shown above. Generated instructions already do.")
 
 
 COMMANDS = {"init": cmd_init, "setup": cmd_setup,

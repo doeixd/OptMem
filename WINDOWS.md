@@ -45,7 +45,7 @@ From the repository the agent will work in:
 
 ```powershell
 Set-Location C:\path\to\project
-& "$HOME\.optmem\memo.cmd" setup --create
+memo setup --create
 ```
 
 This safely creates or updates managed OptMem instructions in both
@@ -56,13 +56,13 @@ default explicitly in scripts. Pass explicit paths to target only selected
 files:
 
 ```powershell
-& "$HOME\.optmem\memo.cmd" setup .\AGENTS.md
+memo setup .\AGENTS.md
 ```
 
 ## Verify
 
 ```powershell
-& "$HOME\.optmem\memo.cmd" doctor
+memo doctor
 ```
 
 `doctor` shows the executable, Python version, current Git origin, active
@@ -104,10 +104,12 @@ Remove those installed components:
 memo uninstall
 ```
 
-Uninstall preserves `$HOME\.optmem\memory` and all project memories. Open a
-new PowerShell window afterward to remove the old command from that process's
-PATH. Delete the memory directories separately only if you intentionally want
-to erase them.
+Uninstall preserves `$HOME\.optmem\memory`, all project memories, and managed
+blocks in connected agent instruction files. Open a new PowerShell window
+afterward to remove the old command from that process's PATH. If permanently
+retiring OptMem, remove its `OPTMEM:START`/`OPTMEM:END` blocks from
+`AGENTS.md`, `CLAUDE.md`, or other connected instruction files. Delete the
+memory directories separately only if you intentionally want to erase them.
 
 ## Shell completion
 
