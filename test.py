@@ -171,6 +171,7 @@ helped = subprocess.run(memo + ["--help"], capture_output=True, text=True,
 check(helped.returncode == 0 and "Usage:" in helped.stdout
       and "setup [--create|--no-create] [FILE ...]" in helped.stdout
       and "completion <shell>" in helped.stdout
+      and "upgrade" in helped.stdout and "uninstall" in helped.stdout
       and "doctor" in helped.stdout and "recall --fuzzy" in helped.stdout,
       "--help is not a useful command overview:\n" + helped.stdout + helped.stderr)
 help_alias = subprocess.run(memo + ["help"], capture_output=True, text=True,
@@ -189,6 +190,8 @@ for shell, signature in completion_signatures.items():
     check(completed.returncode == 0 and signature in completed.stdout,
           "%s completion is missing or invalid:\n%s%s"
           % (shell, completed.stdout, completed.stderr))
+    check("upgrade" in completed.stdout and "uninstall" in completed.stdout,
+          "%s completion omits maintenance commands" % shell)
 bad_completion = subprocess.run(memo + ["completion", "tcsh"],
                                 capture_output=True, text=True, env=fresh)
 check(bad_completion.returncode == 1
@@ -196,6 +199,13 @@ check(bad_completion.returncode == 1
       "an unsupported completion shell did not show valid choices")
 check(not os.path.exists(os.path.join(fresh["HOME"], ".optmem", "memory")),
       "printing a completion script created a memory store")
+for maintenance_command in ("upgrade", "uninstall"):
+    refused = subprocess.run(memo + [maintenance_command],
+                             capture_output=True, text=True, env=fresh)
+    check(refused.returncode == 1 and "source checkout" in refused.stderr
+          and ("memo %s" % maintenance_command) in refused.stderr,
+          "%s did not protect the source checkout:\n%s%s"
+          % (maintenance_command, refused.stdout, refused.stderr))
 unknown = subprocess.run(memo + ["wat"], capture_output=True, text=True,
                          env=fresh)
 check(unknown.returncode == 1 and "No such command: wat" in unknown.stderr
@@ -308,6 +318,101 @@ check(conflicting_setup.returncode == 1
       and "either --create or --no-create" in conflicting_setup.stderr,
       "setup accepted conflicting creation flags")
 
+# Uninstall removes only the installed command and integration it owns. It
+# must leave both global and project memories—and unrelated profile text—intact.
+maintenance_home = tempfile.mkdtemp(prefix="optmem-maintenance-")
+maintenance_install = os.path.join(maintenance_home, ".optmem")
+os.makedirs(os.path.join(maintenance_install, "memory"))
+installed_memo = os.path.join(maintenance_install, "memo")
+shutil.copy2(MEMO, installed_memo)
+installed_launcher = installed_memo + ".cmd"
+with open(installed_launcher, "w", encoding="utf-8") as f:
+    f.write("@echo off\n")
+with open(os.path.join(maintenance_install, "memory", "KEEP"), "w") as f:
+    f.write("global memory")
+maintenance_xdg = os.path.join(maintenance_home, "data")
+project_keep = os.path.join(maintenance_xdg, "optmem", "KEEP")
+os.makedirs(os.path.dirname(project_keep))
+with open(project_keep, "w") as f:
+    f.write("project memory")
+if os.name == "nt":
+    completion_file = os.path.join(maintenance_install, "memo-completion.ps1")
+    profile_file = os.path.join(
+        maintenance_home, "Documents", "WindowsPowerShell", "profile.ps1")
+    managed_line = ". '%s'" % completion_file.replace("'", "''")
+else:
+    completion_file = os.path.join(
+        maintenance_xdg, "bash-completion", "completions", "memo")
+    profile_file = os.path.join(maintenance_home, ".bashrc")
+    managed_line = 'export PATH="$HOME/.optmem:$PATH"'
+os.makedirs(os.path.dirname(completion_file), exist_ok=True)
+with open(completion_file, "w") as f:
+    f.write("completion")
+os.makedirs(os.path.dirname(profile_file), exist_ok=True)
+with open(profile_file, "w", encoding="utf-8") as f:
+    f.write("before\n# OptMem %s\n%s\nafter\n"
+            % ("completion" if os.name == "nt" else "command", managed_line))
+maintenance_env = dict(
+    fresh, HOME=maintenance_home, USERPROFILE=maintenance_home,
+    XDG_DATA_HOME=maintenance_xdg)
+
+# Exercise the full upgrade downloader/runner against a local authoritative
+# installer, never the network or the developer's real installation.
+fake_release = tempfile.mkdtemp(prefix="optmem-release-")
+upgrade_marker = os.path.join(fake_release, "UPGRADED")
+if os.name == "nt":
+    fake_installer = os.path.join(fake_release, "install.ps1")
+    with open(fake_installer, "w", encoding="utf-8") as f:
+        f.write("# OptMem installer\n"
+                "[IO.File]::WriteAllText($env:OPTMEM_UPGRADE_MARKER, 'ok')\n")
+else:
+    fake_installer = os.path.join(fake_release, "install.sh")
+    with open(fake_installer, "w", encoding="utf-8") as f:
+        f.write("#!/bin/sh\n# OptMem installer\n"
+                "printf ok > \"$OPTMEM_UPGRADE_MARKER\"\n")
+saved_module_file, saved_install_base = cli.__file__, cli.INSTALL_BASE
+saved_maintenance_env = {
+    key: os.environ.get(key) for key in
+    ("HOME", "USERPROFILE", "XDG_DATA_HOME", "OPTMEM_UPGRADE_MARKER")}
+upgrade_code = 0
+try:
+    os.environ.update(maintenance_env)
+    os.environ["OPTMEM_UPGRADE_MARKER"] = upgrade_marker
+    cli.__file__ = installed_memo
+    from pathlib import Path
+    cli.INSTALL_BASE = Path(fake_release).as_uri()
+    try:
+        cli.cmd_upgrade(None, [])
+    except SystemExit as e:
+        upgrade_code = e.code if isinstance(e.code, int) else 1
+finally:
+    cli.__file__, cli.INSTALL_BASE = saved_module_file, saved_install_base
+    for key, value in saved_maintenance_env.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+check(upgrade_code == 0 and os.path.exists(upgrade_marker)
+      and open(upgrade_marker).read() == "ok",
+      "upgrade did not download and execute the validated installer")
+
+removed = subprocess.run(
+    [sys.executable, installed_memo, "uninstall"],
+    capture_output=True, text=True, env=maintenance_env)
+check(removed.returncode == 0 and "Preserved global memory" in removed.stdout
+      and "Preserved project memories" in removed.stdout,
+      "uninstall failed:\n" + removed.stdout + removed.stderr)
+check(not os.path.exists(installed_memo)
+      and not os.path.exists(installed_launcher)
+      and not os.path.exists(completion_file),
+      "uninstall left installed executable or completion files")
+check(os.path.exists(os.path.join(maintenance_install, "memory", "KEEP"))
+      and os.path.exists(project_keep),
+      "uninstall deleted memory data")
+profile_after = open(profile_file, encoding="utf-8").read()
+check(profile_after == "before\nafter\n",
+      "uninstall damaged unrelated profile content: %r" % profile_after)
+
 noenv = subprocess.run(memo + ["wake"], capture_output=True, text=True, env=fresh)
 check(noenv.returncode == 0 and "No global memory yet" in noenv.stdout
       and " init" in noenv.stdout,
@@ -317,7 +422,7 @@ init = subprocess.run(memo + ["init"], capture_output=True, text=True, env=fresh
 check(init.returncode == 0 and "## Memory" in init.stdout
       and "You are a" in init.stdout, "init must print the AGENTS.md block")
 check("append-only log" in init.stdout
-      and "lossy one-line summaries" in init.stdout
+      and "binary tree of lossy one-line" in init.stdout
       and "raw memories remain searchable" in init.stdout,
       "agent instructions do not explain the memory/compression model")
 check("BEGIN OPTMEM AGENT INSTRUCTIONS" in init.stdout
@@ -918,6 +1023,8 @@ check("1 match" in r.stdout or "scoped memories" in r.stdout,
       "recall did not read the project memory: " + r.stdout + r.stderr)
 
 shutil.rmtree(repo)
+shutil.rmtree(fake_release)
+shutil.rmtree(maintenance_home)
 shutil.rmtree(setup_dir)
 shutil.rmtree(fresh["HOME"])
 shutil.rmtree(xdg)

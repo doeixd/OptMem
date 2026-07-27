@@ -9,6 +9,8 @@ Start here:
   {memo} setup [--create|--no-create] [FILE ...]
                                  update AGENTS.md and CLAUDE.md safely
   {memo} completion <shell>      print bash, zsh, fish, or powershell setup
+  {memo} upgrade                 download and validate the latest release
+  {memo} uninstall               remove the tool; preserve every memory
   {memo} doctor                  check installation, scope, stores, and FFF
   {memo} wake [part [T]]         read global then project memory
 
@@ -80,6 +82,7 @@ ME = TOOL
 
 # The memory that follows you everywhere, as opposed to the one per project.
 GLOBAL = "~/.optmem/memory"
+INSTALL_BASE = "https://raw.githubusercontent.com/doeixd/OptMem/main"
 SCOPE_GLOBAL = False  # set by main() from `--global`
 
 # The sizes a memory may override in its own `config` file: the default, and
@@ -561,7 +564,7 @@ def nap_prompt(d, lo, hi, left):
     return ("Compress memories #%d-%d into one line of at most %d characters.\n"
             "Make it a self-contained retrieval cue. Preserve durable "
             "decisions, outcomes, constraints, causal links, and useful "
-            "failure reasons. Drop transient status, chronology, and "
+            "failure reasons. Drop transient status, incidental chronology, and "
             "repetition. Use specific names; invent nothing and never imply "
             "a link between unrelated facts.\n\n"
             "%s\n%s\n"
@@ -594,9 +597,9 @@ Without it you do not know who you are, or what was decided and tried.
 
 Each scope is an append-only log. `note` adds one raw memory with a stable
 `#ID`; raw memories remain the source of truth and are never rewritten.
-To keep startup context bounded, adjacent older memories are compressed
-into a binary tree of lossy one-line summaries while recent memories stay
-detailed. `wake` shows a bounded frontier from that tree, not full history.
+Adjacent memories are also represented by a binary tree of lossy one-line
+summaries. `wake` shows a bounded frontier from that tree—not full history—
+with coarser summaries for older history and finer detail toward the present.
 `recall` searches the raw log; `zoom` expands a summary toward its raw entries.
 
 ### At startup: activating OptMem (mandatory)
@@ -621,13 +624,14 @@ lesson -- write it to that project.
 
 Do not register redundant memories.
 
-If `{memo} note` asks a compression, do it before your next action.
+If `{memo} note` asks a compression, follow its prompt and run the exact
+`nap` command before your next action.
 A compression is a lossy retrieval cue for the supplied range, not a
 deletion: the raw memories remain searchable. Write one self-contained line.
 Preserve durable decisions, outcomes, constraints, causal links, preferences,
-and useful failure reasons. Drop transient status, chronology, and repetition.
-Use specific names; invent nothing and never imply a link between unrelated
-facts.
+and useful failure reasons. Drop transient status, incidental chronology, and
+repetition. Use specific names; invent nothing and never imply a link between
+unrelated facts.
 
 Never edit or delete a memory directory: the tool manages it.
 
@@ -674,7 +678,7 @@ _memo_completion() {
     done
 
     if [ -z "$cmd" ]; then
-        _memo_compgen -W "--global init setup completion doctor wake note recall zoom nap forget config import" -- "$cur"
+        _memo_compgen -W "--global init setup completion upgrade uninstall doctor wake note recall zoom nap forget config import" -- "$cur"
         return
     fi
     case "$cmd" in
@@ -709,6 +713,8 @@ _memo() {
         'init:create global memory and print agent instructions'
         'setup:add or update agent instruction files'
         'completion:print a shell completion script'
+        'upgrade:download and validate the latest release'
+        'uninstall:remove the tool while preserving memories'
         'doctor:diagnose installation and memory scope'
         'wake:read global then project memory'
         'note:record one durable memory'
@@ -762,6 +768,8 @@ complete -c memo -n __memo_needs_command -l global -d 'Use global memory'
 complete -c memo -n __memo_needs_command -a init -d 'Create global memory and print instructions'
 complete -c memo -n __memo_needs_command -a setup -d 'Add or update agent instruction files'
 complete -c memo -n __memo_needs_command -a completion -d 'Print a shell completion script'
+complete -c memo -n __memo_needs_command -a upgrade -d 'Download and validate the latest release'
+complete -c memo -n __memo_needs_command -a uninstall -d 'Remove the tool while preserving memories'
 complete -c memo -n __memo_needs_command -a doctor -d 'Diagnose installation and memory scope'
 complete -c memo -n __memo_needs_command -a wake -d 'Read global then project memory'
 complete -c memo -n __memo_needs_command -a note -d 'Record one durable memory'
@@ -784,6 +792,8 @@ Register-ArgumentCompleter -Native -CommandName memo -ScriptBlock {
         init       = 'Create global memory and print agent instructions'
         setup      = 'Add or update agent instruction files'
         completion = 'Print a shell completion script'
+        upgrade    = 'Download and validate the latest release'
+        uninstall  = 'Remove the tool while preserving memories'
         doctor     = 'Diagnose installation and memory scope'
         wake       = 'Read global then project memory'
         note       = 'Record one durable memory'
@@ -995,6 +1005,247 @@ def cmd_completion(d, args):
     if len(args) != 1 or args[0].lower() not in COMPLETIONS:
         die("Usage: %s completion <bash|zsh|fish|powershell>" % TOOL)
     print(COMPLETIONS[args[0].lower()].rstrip())
+
+
+def _install_dir():
+    return os.path.abspath(os.path.expanduser("~/.optmem"))
+
+
+def _require_installed(command):
+    """Never let maintenance commands overwrite or delete a source checkout."""
+    expected = os.path.join(_install_dir(), "memo")
+    actual = os.path.abspath(__file__)
+    same = (os.path.normcase(os.path.realpath(actual)) ==
+            os.path.normcase(os.path.realpath(expected)))
+    if not same:
+        die("%s only operates on the installed copy at %s, not this source "
+            "checkout.\nRun the installed `memo %s` command instead."
+            % (command.capitalize(), pretty(expected), command))
+    return _install_dir()
+
+
+def cmd_upgrade(d, args):
+    """Run the authoritative installer, which validates before replacement."""
+    if args:
+        die("Usage: %s upgrade" % TOOL)
+    _require_installed("upgrade")
+    import urllib.request
+    windows = os.name == "nt"
+    name = "install.ps1" if windows else "install.sh"
+    url = INSTALL_BASE + "/" + name
+    try:
+        with urllib.request.urlopen(url, timeout=30) as response:
+            script = response.read(500001)
+    except Exception as e:
+        die("Could not download %s: %s." % (url, e))
+    if len(script) > 500000 or b"OptMem installer" not in script:
+        die("Refusing unexpected installer content from %s." % url)
+
+    fd, path = tempfile.mkstemp(prefix="optmem-upgrade-",
+                                suffix=(".ps1" if windows else ".sh"))
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(script)
+            f.flush()
+            os.fsync(f.fileno())
+        if windows:
+            shell = shutil.which("powershell") or shutil.which("pwsh")
+            if not shell:
+                die("Upgrade needs PowerShell, but neither powershell nor "
+                    "pwsh is available.")
+            command = [shell, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                       "-File", path]
+        else:
+            command = ["sh", path]
+        result = subprocess.run(command)
+        if result.returncode:
+            die("Upgrade installer exited with status %d." % result.returncode)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _remove_managed_pair(path, marker, line):
+    """Remove only a marker/line pair OptMem owns; preserve all other bytes."""
+    if not os.path.isfile(path):
+        return False
+    path = os.path.realpath(path)
+    raw = open(path, "rb").read()
+    if raw.startswith(b"\xef\xbb\xbf"):
+        bom, encoding, body = b"\xef\xbb\xbf", "utf-8", raw[3:]
+    elif raw.startswith(b"\xff\xfe"):
+        bom, encoding, body = b"\xff\xfe", "utf-16-le", raw[2:]
+    elif raw.startswith(b"\xfe\xff"):
+        bom, encoding, body = b"\xfe\xff", "utf-16-be", raw[2:]
+    else:
+        bom, body = b"", raw
+        try:
+            body.decode("utf-8")
+            encoding = "utf-8"
+        except UnicodeDecodeError:
+            # A byte-for-byte fallback for legacy ANSI profiles. The managed
+            # lines are ASCII, so latin-1 finds them without corrupting any
+            # other byte when the file is encoded again.
+            encoding = "latin-1"
+    text = body.decode(encoding)
+    updated = text
+    for newline in ("\r\n", "\n"):
+        pair = marker + newline + line
+        updated = updated.replace(pair + newline, "")
+        updated = updated.replace(pair, "")
+    if updated == text:
+        return False
+    _atomic_replace(path, bom + updated.encode(encoding), True)
+    return True
+
+
+def _windows_profile_paths():
+    """All common all-hosts PowerShell profiles, including redirected ones."""
+    home = os.path.expanduser("~")
+    paths = [
+        os.path.join(home, "Documents", "WindowsPowerShell", "profile.ps1"),
+        os.path.join(home, "Documents", "PowerShell", "profile.ps1"),
+    ]
+    for shell_name in ("powershell", "pwsh"):
+        shell = shutil.which(shell_name)
+        if not shell:
+            continue
+        result = subprocess.run(
+            [shell, "-NoProfile", "-Command",
+             "[Console]::Out.Write($PROFILE.CurrentUserAllHosts)"],
+            capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            paths.append(result.stdout.strip())
+    out, seen = [], set()
+    for path in paths:
+        key = os.path.normcase(os.path.abspath(path))
+        if key not in seen:
+            seen.add(key)
+            out.append(path)
+    return out
+
+
+def _remove_windows_user_path(install):
+    """Remove exactly the installed directory from the persistent user PATH."""
+    import winreg
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                             winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE)
+    except OSError:
+        return False
+    try:
+        try:
+            value, kind = winreg.QueryValueEx(key, "Path")
+        except OSError:
+            return False
+        target = os.path.normcase(os.path.normpath(install))
+        parts, changed = [], False
+        for part in value.split(";"):
+            expanded = os.path.expandvars(part.strip().strip('"'))
+            if expanded and os.path.normcase(os.path.normpath(expanded)) == target:
+                changed = True
+            elif part:
+                parts.append(part)
+        if changed:
+            winreg.SetValueEx(key, "Path", 0, kind, ";".join(parts))
+            try:
+                import ctypes
+                send = ctypes.windll.user32.SendMessageTimeoutW
+                send.argtypes = [
+                    ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p,
+                    ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_uint,
+                    ctypes.POINTER(ctypes.c_size_t)]
+                result = ctypes.c_size_t()
+                send(ctypes.c_void_p(0xffff), 0x001a, None, "Environment",
+                     0x0002, 5000, ctypes.byref(result))
+            except Exception:
+                pass  # The registry is authoritative; broadcast is best effort.
+        return changed
+    finally:
+        winreg.CloseKey(key)
+
+
+def _schedule_windows_removal(paths):
+    """Delete files locked by the parent memo.cmd after this process exits."""
+    fd, helper = tempfile.mkstemp(prefix="optmem-uninstall-", suffix=".cmd")
+    lines = ["@echo off", "for /l %%N in (1,1,15) do ("]
+    for path in paths:
+        lines.append('  del /f /q "%s" >nul 2>&1' % path.replace("%", "%%"))
+    lines.extend(["  timeout /t 1 /nobreak >nul", ")",
+                  'del /f /q "%~f0" >nul 2>&1'])
+    with os.fdopen(fd, "w", newline="\r\n") as f:
+        f.write("\n".join(lines) + "\n")
+    flags = 0x08000000 | 0x00000008  # CREATE_NO_WINDOW | DETACHED_PROCESS
+    subprocess.Popen(["cmd.exe", "/d", "/c", helper],
+                     creationflags=flags, close_fds=True)
+
+
+def cmd_uninstall(d, args):
+    """Remove program integrations and executables, never memory data."""
+    if args:
+        die("Usage: %s uninstall" % TOOL)
+    install = _require_installed("uninstall")
+    home = os.path.expanduser("~")
+
+    if os.name == "nt":
+        completion = os.path.join(install, "memo-completion.ps1")
+        source = ". '%s'" % completion.replace("'", "''")
+        for profile in _windows_profile_paths():
+            _remove_managed_pair(profile, "# OptMem completion", source)
+        _remove_windows_user_path(install)
+        completion_files = [completion]
+    else:
+        export = 'export PATH="$HOME/.optmem:$PATH"'
+        fish_path = 'fish_add_path -g "$HOME/.optmem"'
+        for profile in (os.path.join(home, ".bashrc"),
+                        os.path.join(home, ".zshrc"),
+                        os.path.join(home, ".profile")):
+            _remove_managed_pair(profile, "# OptMem command", export)
+        _remove_managed_pair(
+            os.path.join(home, ".config", "fish", "config.fish"),
+            "# OptMem command", fish_path)
+        _remove_managed_pair(
+            os.path.join(home, ".zshrc"), "# OptMem completion",
+            'fpath=("$HOME/.zfunc" $fpath); autoload -Uz compinit && compinit')
+        completion_files = [
+            os.path.join(os.environ.get("XDG_DATA_HOME") or
+                         os.path.join(home, ".local", "share"),
+                         "bash-completion", "completions", "memo"),
+            os.path.join(home, ".zfunc", "_memo"),
+            os.path.join(os.environ.get("XDG_CONFIG_HOME") or
+                         os.path.join(home, ".config"),
+                         "fish", "completions", "memo.fish"),
+        ]
+
+    files = completion_files + [
+        os.path.join(install, "memo.cmd"),
+        os.path.join(install, "memo"),
+    ]
+    pending = []
+    for path in files:
+        if not os.path.lexists(path):
+            continue
+        try:
+            os.unlink(path)
+        except PermissionError:
+            pending.append(path)
+    if pending:
+        if os.name == "nt":
+            _schedule_windows_removal(pending)
+            print("Locked launcher files will be removed after this command exits.")
+        else:
+            die("Could not remove: %s." % ", ".join(map(pretty, pending)))
+
+    project_root = os.path.join(
+        os.environ.get("XDG_DATA_HOME") or
+        os.path.join(home, ".local", "share"), "optmem")
+    print("Uninstalled the memo command and shell completion.")
+    print("Preserved global memory: %s" %
+          pretty(os.path.join(install, "memory")))
+    print("Preserved project memories: %s" % pretty(project_root))
+    print("Open a new shell to finish removing memo from the current PATH.")
 
 
 def cmd_init(d, args):
@@ -1438,7 +1689,8 @@ def cmd_doctor(d, args):
 
 
 COMMANDS = {"init": cmd_init, "setup": cmd_setup,
-            "completion": cmd_completion, "wake": cmd_wake,
+            "completion": cmd_completion, "upgrade": cmd_upgrade,
+            "uninstall": cmd_uninstall, "wake": cmd_wake,
             "note": cmd_note,
             "nap": cmd_nap, "recall": cmd_recall, "zoom": cmd_zoom,
             "forget": cmd_forget, "config": cmd_config, "import": cmd_import,
@@ -1483,6 +1735,12 @@ def main():
             return
         if cmd == "completion":
             cmd_completion(None, argv[1:])
+            return
+        if cmd == "upgrade":
+            cmd_upgrade(None, argv[1:])
+            return
+        if cmd == "uninstall":
+            cmd_uninstall(None, argv[1:])
             return
         if cmd == "wake" and not SCOPE_GLOBAL and not os.environ.get("MEMORY_DIR"):
             wake_both(argv[1:])

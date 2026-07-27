@@ -141,10 +141,10 @@ walkthrough, and guidance for subagents.
 | Explicit override | Set `MEMORY_DIR` | Advanced use: pin every command to one chosen store and bypass project/global scoping |
 
 Each store has an append-only raw log and a rebuildable binary tree of lossy
-summaries. `wake` reads a bounded mix of recent raw entries and older summary
-nodes; `recall` searches the full raw log, while `zoom` opens a summary toward
-the entries beneath it. Compression makes startup context smaller—it never
-deletes the raw memories.
+summaries. `wake` reads a bounded frontier with coarser summaries for older
+history and finer detail toward the present; `recall` searches the full raw
+log, while `zoom` opens a summary toward the entries beneath it. Compression
+makes startup context smaller—it never deletes the raw memories.
 
 `memo wake` is special: without `MEMORY_DIR`, it reads global memory first and
 project memory second. Other commands target only one scope. Put `--global`
@@ -162,6 +162,8 @@ directory. Run `memo doctor` whenever the selected scope is surprising.
 | `memo init` | create the global memory and print the current agent instructions |
 | `memo setup [--create\|--no-create] [FILE ...]` | update instructions in existing files; defaults to `AGENTS.md` and `CLAUDE.md`, with creation opt-in |
 | `memo completion <shell>` | print completion for Bash, Zsh, Fish, or PowerShell |
+| `memo upgrade` | download the latest release, validate it, and refresh PATH/completion setup |
+| `memo uninstall` | remove the command and shell integration while preserving every memory |
 | `memo doctor` | explain the active scope, store paths, Python, PATH, Git origin, and FFF availability |
 | `memo wake` | read both memories — global, then project; first command of every session |
 | `memo note "..."` | record one memory: one line, up to 280 chars (project by default) |
@@ -261,11 +263,29 @@ details.
 Backing up the memory directories is sufficient; never hand-edit them while an
 agent may be writing.
 
-## Update, troubleshoot, and remove
+## Upgrade, uninstall, and troubleshoot
 
-Re-run the installer to update. It idempotently keeps `memo` and its shell
-completion configured, replaces only the tool (and the Windows launcher), then
-runs `memo init`; existing logs, summaries, and configuration remain untouched.
+Upgrade from any directory:
+
+```sh
+memo upgrade
+```
+
+This downloads the current installer over HTTPS. The installer validates the
+new CLI before replacing the installed copy, refreshes PATH and completion
+setup idempotently, and preserves logs, summaries, and configuration.
+
+Remove OptMem's executable, PATH/profile hooks, and shell completion:
+
+```sh
+memo uninstall
+```
+
+Uninstall deliberately preserves the global store at `~/.optmem/memory` and
+all project stores under `${XDG_DATA_HOME:-~/.local/share}/optmem`, so
+reinstalling restores access to the same history. Open a new shell afterward
+to discard the old process PATH. Delete memory directories manually only when
+you intentionally want to erase that data.
 
 Start troubleshooting with:
 
@@ -285,13 +305,6 @@ Common fixes:
   `fff-search` under Python 3.10+ to enable it.
 - A command names `MEMORY_DIR`: verify that the environment variable points to
   the intended existing store.
-
-To remove the executable while preserving all memories, delete only
-`~/.optmem/memo` and, on Windows, `~/.optmem/memo.cmd`, then remove
-`~/.optmem` from your PATH or shell startup file. The global store lives at
-`~/.optmem/memory`; project stores live under
-`${XDG_DATA_HOME:-~/.local/share}/optmem`. Back them up before deleting any
-memory data.
 
 Developing or contributing? See [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -317,9 +330,9 @@ Without it you do not know who you are, or what was decided and tried.
 
 Each scope is an append-only log. `note` adds one raw memory with a stable
 `#ID`; raw memories remain the source of truth and are never rewritten.
-To keep startup context bounded, adjacent older memories are compressed
-into a binary tree of lossy one-line summaries while recent memories stay
-detailed. `wake` shows a bounded frontier from that tree, not full history.
+Adjacent memories are also represented by a binary tree of lossy one-line
+summaries. `wake` shows a bounded frontier from that tree—not full history—
+with coarser summaries for older history and finer detail toward the present.
 `recall` searches the raw log; `zoom` expands a summary toward its raw entries.
 
 ### At startup: activating OptMem (mandatory)
@@ -344,13 +357,14 @@ lesson -- write it to that project.
 
 Do not register redundant memories.
 
-If `memo note` asks a compression, do it before your next action.
+If `memo note` asks a compression, follow its prompt and run the exact
+`nap` command before your next action.
 A compression is a lossy retrieval cue for the supplied range, not a
 deletion: the raw memories remain searchable. Write one self-contained line.
 Preserve durable decisions, outcomes, constraints, causal links, preferences,
-and useful failure reasons. Drop transient status, chronology, and repetition.
-Use specific names; invent nothing and never imply a link between unrelated
-facts.
+and useful failure reasons. Drop transient status, incidental chronology, and
+repetition. Use specific names; invent nothing and never imply a link between
+unrelated facts.
 
 Never edit or delete a memory directory: the tool manages it.
 
