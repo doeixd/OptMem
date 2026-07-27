@@ -12,7 +12,7 @@ Start here:
   {memo} upgrade                 download and validate the latest release
   {memo} uninstall               remove the tool; preserve every memory
   {memo} doctor                  check installation, scope, stores, FFF, QMD
-  {memo} qmd <command>           manage optional semantic recall
+  {memo} qmd [help]              explain or manage optional semantic recall
   {memo} wake [part [T]]         read global then project memory
 
 Remember and retrieve:
@@ -712,7 +712,11 @@ _memo_completion() {
             _memo_compgen -W "--fuzzy --semantic --limit --context" -- "$cur"
             ;;
         qmd)
-            _memo_compgen -W "enable status rebuild disable --purge" -- "$cur"
+            if [[ " ${COMP_WORDS[*]} " == *" disable "* ]]; then
+                _memo_compgen -W "--purge" -- "$cur"
+            else
+                _memo_compgen -W "enable status rebuild disable help" -- "$cur"
+            fi
             ;;
         zoom)
             _memo_compgen -W "--depth" -- "$cur"
@@ -775,8 +779,11 @@ _memo() {
                 '*:query:'
             ;;
         qmd)
-            _arguments '--purge[remove the disposable projection]' \
-                '1:qmd command:(enable status rebuild disable)'
+            if (( ${words[(Ie)disable]} )); then
+                _arguments '--purge[remove the disposable projection]'
+            else
+                _values 'qmd command' enable status rebuild disable help
+            fi
             ;;
         zoom)
             _arguments '--depth=[tree levels to open]:depth:' '1:block id:'
@@ -824,7 +831,7 @@ complete -c memo -n 'contains -- recall (commandline -opc)' -l semantic -d 'Use 
 complete -c memo -n 'contains -- recall (commandline -opc)' -l limit -r -d 'Maximum matching memories'
 complete -c memo -n 'contains -- recall (commandline -opc)' -l context -r -d 'Neighboring memories on each side'
 complete -c memo -n 'contains -- zoom (commandline -opc)' -l depth -r -d 'Tree levels to open'
-complete -c memo -n 'contains -- qmd (commandline -opc)' -a 'enable status rebuild disable'
+complete -c memo -n 'contains -- qmd (commandline -opc)' -a 'enable status rebuild disable help'
 complete -c memo -n 'contains -- qmd (commandline -opc); and contains -- disable (commandline -opc)' -l purge -d 'Remove the disposable projection'
 complete -c memo -n 'contains -- config (commandline -opc)' -a 'WAKE_LINES= ENTRY_CHARS= PART_CHARS= PART_LINES='""",
     "powershell": r"""# PowerShell completion for memo
@@ -861,7 +868,13 @@ Register-ArgumentCompleter -Native -CommandName memo -ScriptBlock {
             setup      { '--create', '--no-create' }
             completion { 'bash', 'zsh', 'fish', 'powershell' }
             recall     { '--fuzzy', '--semantic', '--limit', '--context' }
-            qmd        { 'enable', 'status', 'rebuild', 'disable', '--purge' }
+            qmd        {
+                if ($tokens -contains 'disable') {
+                    '--purge'
+                } else {
+                    'enable', 'status', 'rebuild', 'disable', 'help'
+                }
+            }
             zoom       { '--depth' }
             config     { 'WAKE_LINES=', 'ENTRY_CHARS=', 'PART_CHARS=', 'PART_LINES=' }
             default    { @() }
@@ -1547,7 +1560,8 @@ def _qmd_run(args, timeout=120):
     exe = shutil.which("qmd")
     if not exe:
         raise QmdError(
-            "qmd is not installed (install with: npm install -g @tobilu/qmd)")
+            "qmd is not installed (requires Node.js 22+; install with: "
+            "npm install -g @tobilu/qmd)")
     env = dict(os.environ)
     env["NO_COLOR"] = "1"
     try:
@@ -1563,7 +1577,8 @@ def _qmd_run(args, timeout=120):
         detail = (result.stderr or result.stdout).strip()
         detail = "; ".join(line.strip() for line in detail.splitlines()
                            if line.strip())[:500]
-        raise QmdError(detail or "qmd exited with status %d" % result.returncode)
+        failure = detail or "exited with status %d" % result.returncode
+        raise QmdError("%s failed: %s" % (pretty(exe), failure))
     return result.stdout.strip()
 
 
@@ -1836,8 +1851,24 @@ def _qmd_status(d, probe=True):
 
 
 def cmd_qmd(d, args):
-    if not args or args[0] not in ("enable", "status", "rebuild", "disable"):
-        die("usage: %s qmd <enable|status|rebuild|disable [--purge]>" % ME)
+    if not args or args in (["help"], ["--help"], ["-h"]):
+        print("""Optional QMD semantic recall (disabled by default, per scope).
+
+Usage:
+  %s qmd enable             enable the integration; indexing stays lazy
+  %s qmd status             inspect the executable and derived index state
+  %s qmd rebuild            recreate the projection, collection, and embeddings
+  %s qmd disable            unregister QMD but keep the disposable projection
+  %s qmd disable --purge    also remove the disposable projection
+
+Recall by meaning with:
+  %s recall --semantic "<meaning>"
+
+LOG.txt remains authoritative. QMD never participates in note, nap, or wake."""
+              % (ME, ME, ME, ME, ME, ME))
+        return
+    if args[0] not in ("enable", "status", "rebuild", "disable"):
+        die("Unknown QMD command: %s.\nRun: %s qmd help" % (args[0], ME))
     command, rest = args[0], args[1:]
     if command == "status":
         if rest:
@@ -1852,6 +1883,8 @@ def cmd_qmd(d, args):
         print("  Embeddings:      %s" % state["embeddings"])
         if "unavailable:" in state["executable"]:
             print("  Exact/FFF recall remains available.")
+            print("  Repair/remove the QMD launcher shown above, then install with:")
+            print("    npm install -g @tobilu/qmd  (Node.js 22+)")
         return
     if command == "enable":
         if rest:
@@ -2444,9 +2477,16 @@ def main():
         if cmd == "uninstall":
             cmd_uninstall(None, argv[1:])
             return
-        if cmd == "qmd" and argv[1:] == ["status"]:
-            cmd_qmd(memory_dir(), argv[1:])
-            return
+        if cmd == "qmd":
+            qmd_args = argv[1:]
+            read_only = (not qmd_args or qmd_args[0] in
+                         ("help", "--help", "-h", "status"))
+            invalid = bool(qmd_args and qmd_args[0] not in
+                           ("enable", "status", "rebuild", "disable",
+                            "help", "--help", "-h"))
+            if read_only or invalid:
+                cmd_qmd(memory_dir(), qmd_args)
+                return
         if cmd == "recall" and "--semantic" in argv[1:]:
             _, semantic, _, _, query = _recall_args(argv[1:])
             if semantic and not qmd_enabled(memory_dir()):

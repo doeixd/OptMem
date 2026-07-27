@@ -173,6 +173,7 @@ directory. Run `memo doctor` whenever the selected scope is surprising.
 | `memo uninstall` | remove the command and shell integration while preserving every memory |
 | `memo doctor` | explain the active scope, store paths, Python, PATH, Git origin, FFF, and QMD |
 | `memo qmd enable` | explicitly enable optional QMD semantic recall for this scope |
+| `memo qmd help` | explain the integration’s commands, isolation, and lazy behavior |
 | `memo qmd status` | inspect the QMD executable, projection, collection, and embeddings |
 | `memo qmd rebuild` | rebuild this scope's disposable projection and QMD collection |
 | `memo qmd disable [--purge]` | disable QMD; optionally remove its projection |
@@ -256,6 +257,7 @@ only if you want meaning-based recall:
 
 ```sh
 npm install -g @tobilu/qmd
+memo qmd help
 memo qmd enable
 memo recall --semantic "Why did we stop retrying mutation requests?"
 ```

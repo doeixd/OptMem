@@ -173,7 +173,7 @@ check(helped.returncode == 0 and "Usage:" in helped.stdout
       and "setup [--create|--no-create] [FILE ...]" in helped.stdout
       and "completion <shell>" in helped.stdout
       and "upgrade" in helped.stdout and "uninstall" in helped.stdout
-      and "doctor" in helped.stdout and "qmd <command>" in helped.stdout
+      and "doctor" in helped.stdout and "qmd [help]" in helped.stdout
       and "recall [options]" in helped.stdout,
       "--help is not a useful command overview:\n" + helped.stdout + helped.stderr)
 help_alias = subprocess.run(memo + ["help"], capture_output=True, text=True,
@@ -234,6 +234,21 @@ check(fresh_qmd_status.returncode == 0
       and not os.path.exists(os.path.join(fresh["XDG_DATA_HOME"], "optmem")),
       "qmd status created a project store or failed read-only inspection:\n"
       + fresh_qmd_status.stdout + fresh_qmd_status.stderr)
+fresh_qmd_help = subprocess.run(
+    memo + ["qmd"], capture_output=True, text=True, env=fresh)
+check(fresh_qmd_help.returncode == 0
+      and "Optional QMD semantic recall" in fresh_qmd_help.stdout
+      and "LOG.txt remains authoritative" in fresh_qmd_help.stdout
+      and not os.path.exists(os.path.join(fresh["XDG_DATA_HOME"], "optmem")),
+      "qmd help created a project store or omitted its mental model:\n"
+      + fresh_qmd_help.stdout + fresh_qmd_help.stderr)
+bad_qmd = subprocess.run(
+    memo + ["qmd", "wat"], capture_output=True, text=True, env=fresh)
+check(bad_qmd.returncode == 1 and "Run:" in bad_qmd.stderr
+      and "qmd help" in bad_qmd.stderr
+      and not os.path.exists(os.path.join(fresh["XDG_DATA_HOME"], "optmem")),
+      "an invalid qmd command created a store or omitted help:\n"
+      + bad_qmd.stdout + bad_qmd.stderr)
 fresh_semantic = subprocess.run(
     memo + ["recall", "--semantic", "anything"], capture_output=True,
     text=True, env=fresh)
@@ -741,7 +756,7 @@ def fake_qmd_run(args, timeout=120):
     args = list(args)
     qmd_calls.append((args, timeout))
     if args == ["--version"]:
-        return "qmd 2.6.3"
+        return "qmd 2.5.3"
     if args[:2] == ["collection", "show"]:
         if args[2] not in qmd_collections:
             raise cli.QmdError("Collection not found: " + args[2])
@@ -908,7 +923,7 @@ check(disabled_semantic.returncode == 1
       "semantic recall ran while QMD was disabled")
 qmd_status = run("qmd", "status", store=qmd_store)
 check(qmd_status.returncode == 0 and "Integration:     disabled" in
-      qmd_status.stdout and "qmd 2.6.3" in qmd_status.stdout,
+      qmd_status.stdout and "qmd 2.5.3" in qmd_status.stdout,
       "memo qmd status did not explain disabled retained state:\n"
       + qmd_status.stdout + qmd_status.stderr)
 
@@ -925,6 +940,13 @@ check(purged.returncode == 0 and "Removed the derived projection" in
       "qmd disable --purge left derived projection data")
 cli._qmd_run = lambda args, timeout=120: (
     (_ for _ in ()).throw(cli.QmdError("qmd is not installed")))
+missing_qmd_status = run("qmd", "status", store=qmd_store)
+check(missing_qmd_status.returncode == 0
+      and "Exact/FFF recall remains available" in missing_qmd_status.stdout
+      and "npm install -g @tobilu/qmd" in missing_qmd_status.stdout
+      and "Node.js 22+" in missing_qmd_status.stdout,
+      "qmd status did not provide an actionable, non-blocking repair path:\n"
+      + missing_qmd_status.stdout + missing_qmd_status.stderr)
 missing_qmd = run("qmd", "enable", store=qmd_store)
 check(missing_qmd.returncode == 1 and "Could not enable QMD" in
       missing_qmd.stderr and not os.path.exists(projection),
