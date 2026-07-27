@@ -46,16 +46,16 @@ From the project you want to connect, add the instructions to both
 
 ```sh
 cd /path/to/project
-~/.optmem/memo setup --create
-~/.optmem/memo doctor
+memo setup --create
+memo doctor
 ```
 
 On Windows:
 
 ```powershell
 Set-Location C:\path\to\project
-& "$HOME\.optmem\memo.cmd" setup --create
-& "$HOME\.optmem\memo.cmd" doctor
+memo setup --create
+memo doctor
 ```
 
 By default, `setup` only updates files that already exist; it skips missing
@@ -67,7 +67,7 @@ byte-for-byte unchanged and older managed blocks are updated in place.
 To target another existing instruction file, pass it explicitly:
 
 ```sh
-~/.optmem/memo setup path/to/agent-rules.md
+memo setup path/to/agent-rules.md
 ```
 
 Add `--create` when that explicit file does not exist yet. `--no-create` is
@@ -139,6 +139,12 @@ walkthrough, and guidance for subagents.
 | Current project | `memo note "..."` | Architecture, commands, decisions, failed approaches, repository-specific preferences |
 | Global | `memo --global note "..."` | User preferences, machine/tooling facts, durable information true across unrelated repositories |
 | Explicit override | Set `MEMORY_DIR` | Advanced use: pin every command to one chosen store and bypass project/global scoping |
+
+Each store has an append-only raw log and a rebuildable binary tree of lossy
+summaries. `wake` reads a bounded mix of recent raw entries and older summary
+nodes; `recall` searches the full raw log, while `zoom` opens a summary toward
+the entries beneath it. Compression makes startup context smaller—it never
+deletes the raw memories.
 
 `memo wake` is special: without `MEMORY_DIR`, it reads global memory first and
 project memory second. Other commands target only one scope. Put `--global`
@@ -270,9 +276,8 @@ memo --help
 
 Common fixes:
 
-- `memo: command not found`: open a new shell after installing. You can use
-  `~/.optmem/memo` immediately; on Windows use
-  `& "$HOME\.optmem\memo.cmd"`.
+- `memo: command not found`: open a new shell after installing, or re-run the
+  installer to repair the PATH entry.
 - The wrong project memory appears: run `memo doctor` and check the current
   directory and Git origin.
 - No global memory exists: run `memo init`.
@@ -292,8 +297,8 @@ Developing or contributing? See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Agent instruction block (reference)
 
-`memo setup` writes the authoritative block with the correct executable path
-for the current platform. The Unix form is shown here for review; use the
+`memo setup` writes the authoritative block with a fully qualified executable
+path. The shorter PATH-based form is shown here for readability; use the
 command or copy the version printed by `memo init` rather than hand-editing
 this example.
 
@@ -301,22 +306,31 @@ this example.
 ## Memory
 
 Your memory is OptMem:
-- The tool is `~/.optmem/memo`
+- The tool is `memo`
 - Every project you work in has its own memory
 - One global memory, `~/.optmem/memory`, follows you into all of them
 
 OptMem outlives every session, compaction, model and vendor change.
 Without it you do not know who you are, or what was decided and tried.
 
+### Mental model
+
+Each scope is an append-only log. `note` adds one raw memory with a stable
+`#ID`; raw memories remain the source of truth and are never rewritten.
+To keep startup context bounded, adjacent older memories are compressed
+into a binary tree of lossy one-line summaries while recent memories stay
+detailed. `wake` shows a bounded frontier from that tree, not full history.
+`recall` searches the raw log; `zoom` expands a summary toward its raw entries.
+
 ### At startup: activating OptMem (mandatory)
 
-Run `~/.optmem/memo wake` before any other tool call, in every session, and
+Run `memo wake` before any other tool call, in every session, and
 then do exactly what it prints, to the end of its output. It reads the
 global memory first, then the memory of the project you are in.
 
 ### While working: register memories (mandatory)
 
-Call `~/.optmem/memo note "<1 line, max 280 chars>"` whenever you learn
+Call `memo note "<1 line, max 280 chars>"` whenever you learn
 something new, or something worth keeping happens. That covers a task
 worth real effort, a fact or insight the user teaches you, anything you
 learn about their life (even indirectly), any event of lasting effect.
@@ -330,22 +344,27 @@ lesson -- write it to that project.
 
 Do not register redundant memories.
 
-If `~/.optmem/memo note` asks a compression: do it before your next action.
+If `memo note` asks a compression, do it before your next action.
+A compression is a lossy retrieval cue for the supplied range, not a
+deletion: the raw memories remain searchable. Write one self-contained line.
+Preserve durable decisions, outcomes, constraints, causal links, preferences,
+and useful failure reasons. Drop transient status, chronology, and repetition.
+Use specific names; invent nothing and never imply a link between unrelated
+facts.
 
 Never edit or delete a memory directory: the tool manages it.
 
 ### When you need an old memory: search, or navigate
 
-`~/.optmem/memo recall <regex>` searches every memory, word for word and,
-when `fff-search` is installed, retries a zero-result search fuzzily. Use
-`~/.optmem/memo recall --fuzzy "<text>"` to request typo-tolerant FFF recall
-directly. Recall and `zoom` read the project memory; put `--global` first for
-the global one.
+`memo recall <regex>` searches raw memories, word for word and, when
+`fff-search` is installed, retries a zero-result search fuzzily. Use
+`memo recall --fuzzy "<text>"` to request typo-tolerant FFF recall
+directly. Recall and `zoom` read the project memory; put `--global`
+first for the global one.
 
-Your memories also form a binary tree: #0-1, #2-3 ... exist as one-line
-summaries, pairs of those as #0-3, and so on -- every `#a-b` line wake
-prints is one node of it. `~/.optmem/memo zoom <a-b>` opens a node into its
-two halves, down to the raw memories.
+A `#a-b` line from `wake` is one summary node covering raw memory IDs
+`a` through `b`. `memo zoom <a-b>` opens it into two child nodes;
+repeat until the relevant raw memories appear.
 
 ### If you're a subagent: skip everything above
 

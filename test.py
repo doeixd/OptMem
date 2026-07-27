@@ -55,6 +55,20 @@ def check(cond, msg):
         print("FAIL: " + msg)
 
 
+# The reviewable README block is the generated agent contract with the short
+# PATH command substituted. Keeping this exact prevents documentation drift.
+with open(os.path.join(HERE, "README.md"), encoding="utf-8") as readme_file:
+    readme = readme_file.read()
+documented = re.search(
+    r"## Agent instruction block \(reference\).*?```markdown\n(.*?)\n```",
+    readme, re.DOTALL)
+expected_instructions = cli.TEMPLATE.format(
+    memo="memo", data="~/.optmem/memory",
+    chars=cli.KNOBS["ENTRY_CHARS"][0]).rstrip()
+check(documented and documented.group(1).rstrip() == expected_instructions,
+      "README agent instructions differ from the generated template")
+
+
 # ---- pure block math -------------------------------------------------
 
 for T in list(range(1, 400)) + [1000, 4096, 10000, 65536, 100003]:
@@ -302,6 +316,10 @@ check(noenv.returncode == 0 and "No global memory yet" in noenv.stdout
 init = subprocess.run(memo + ["init"], capture_output=True, text=True, env=fresh)
 check(init.returncode == 0 and "## Memory" in init.stdout
       and "You are a" in init.stdout, "init must print the AGENTS.md block")
+check("append-only log" in init.stdout
+      and "lossy one-line summaries" in init.stdout
+      and "raw memories remain searchable" in init.stdout,
+      "agent instructions do not explain the memory/compression model")
 check("BEGIN OPTMEM AGENT INSTRUCTIONS" in init.stdout
       and "END OPTMEM AGENT INSTRUCTIONS" in init.stdout
       and "Verify this installation" in init.stdout,
@@ -436,6 +454,10 @@ check("None" not in r.stdout, "the refusal printed a Python None")
 naps = 0
 r = run("nap")
 check("Compress memories #" in r.stdout, "nap prompt must name its object")
+check("self-contained retrieval cue" in r.stdout
+      and "causal links" in r.stdout
+      and "never imply a link between unrelated facts" in r.stdout,
+      "nap prompt does not give enough compression guidance")
 while "Nothing left to compress" not in r.stdout:
     line = offered(r.stdout)
     check(bool(line), "no command offered:\n" + r.stdout + r.stderr)

@@ -559,8 +559,11 @@ def nap_prompt(d, lo, hi, left):
         "1 compression remains" if left == 1 else
         "%d compressions remain" % left)
     return ("Compress memories #%d-%d into one line of at most %d characters.\n"
-            "Keep what has lasting effect, drop what does not. Invent "
-            "nothing.\n\n"
+            "Make it a self-contained retrieval cue. Preserve durable "
+            "decisions, outcomes, constraints, causal links, and useful "
+            "failure reasons. Drop transient status, chronology, and "
+            "repetition. Use specific names; invent nothing and never imply "
+            "a link between unrelated facts.\n\n"
             "%s\n%s\n"
             "Run: %s nap %d-%d \"<your line>\""
             % (lo, hi - 1, ENTRY_CHARS, body, tail, ME, lo, hi - 1))
@@ -587,6 +590,15 @@ Your memory is OptMem:
 OptMem outlives every session, compaction, model and vendor change.
 Without it you do not know who you are, or what was decided and tried.
 
+### Mental model
+
+Each scope is an append-only log. `note` adds one raw memory with a stable
+`#ID`; raw memories remain the source of truth and are never rewritten.
+To keep startup context bounded, adjacent older memories are compressed
+into a binary tree of lossy one-line summaries while recent memories stay
+detailed. `wake` shows a bounded frontier from that tree, not full history.
+`recall` searches the raw log; `zoom` expands a summary toward its raw entries.
+
 ### At startup: activating OptMem (mandatory)
 
 Run `{memo} wake` before any other tool call, in every session, and
@@ -609,22 +621,27 @@ lesson -- write it to that project.
 
 Do not register redundant memories.
 
-If `{memo} note` asks a compression: do it before your next action.
+If `{memo} note` asks a compression, do it before your next action.
+A compression is a lossy retrieval cue for the supplied range, not a
+deletion: the raw memories remain searchable. Write one self-contained line.
+Preserve durable decisions, outcomes, constraints, causal links, preferences,
+and useful failure reasons. Drop transient status, chronology, and repetition.
+Use specific names; invent nothing and never imply a link between unrelated
+facts.
 
 Never edit or delete a memory directory: the tool manages it.
 
 ### When you need an old memory: search, or navigate
 
-`{memo} recall <regex>` searches every memory, word for word and, when
+`{memo} recall <regex>` searches raw memories, word for word and, when
 `fff-search` is installed, retries a zero-result search fuzzily. Use
 `{memo} recall --fuzzy "<text>"` to request typo-tolerant FFF recall
 directly. Recall and `zoom` read the project memory; put `--global`
 first for the global one.
 
-Your memories also form a binary tree: #0-1, #2-3 ... exist as one-line
-summaries, pairs of those as #0-3, and so on -- every `#a-b` line wake
-prints is one node of it. `{memo} zoom <a-b>` opens a node into its
-two halves, down to the raw memories.
+A `#a-b` line from `wake` is one summary node covering raw memory IDs
+`a` through `b`. `{memo} zoom <a-b>` opens it into two child nodes;
+repeat until the relevant raw memories appear.
 
 ### If you're a subagent: skip everything above
 
