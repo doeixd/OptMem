@@ -32,8 +32,9 @@ irm https://raw.githubusercontent.com/doeixd/OptMem/main/install.ps1 | iex
 ```
 
 The installer validates the download, installs the tool under `~/.optmem`,
-adds the `memo` command to your user PATH, and creates the global store
-without touching existing memories. It then prints a block between
+adds the `memo` command to your user PATH, registers completion for your
+shell, and creates the global store without touching existing memories. It
+then prints a block between
 `BEGIN OPTMEM AGENT INSTRUCTIONS` and
 `END OPTMEM AGENT INSTRUCTIONS`. Open a new Unix shell after installation;
 the PowerShell installer updates the current session immediately.
@@ -154,6 +155,7 @@ directory. Run `memo doctor` whenever the selected scope is surprising.
 |---|---|
 | `memo init` | create the global memory and print the current agent instructions |
 | `memo setup [--create\|--no-create] [FILE ...]` | update instructions in existing files; defaults to `AGENTS.md` and `CLAUDE.md`, with creation opt-in |
+| `memo completion <shell>` | print completion for Bash, Zsh, Fish, or PowerShell |
 | `memo doctor` | explain the active scope, store paths, Python, PATH, Git origin, and FFF availability |
 | `memo wake` | read both memories — global, then project; first command of every session |
 | `memo note "..."` | record one memory: one line, up to 280 chars (project by default) |
@@ -169,6 +171,22 @@ directory. Run `memo doctor` whenever the selected scope is surprising.
 Put `--global` before any command to reach the memory that follows you into
 every project. Merges arrive one at a time, in the output of `note`. Nothing
 ever runs in the background.
+
+### Shell completion
+
+The installer registers completion for the active shell and does not duplicate
+profile entries when run again. After opening a new shell, type `memo` and
+press Tab to complete commands, flags, configuration names, and setup/import
+paths.
+
+For a custom shell configuration, print the completion script directly:
+
+```sh
+memo completion bash
+memo completion zsh
+memo completion fish
+memo completion powershell
+```
 
 ### Optional fuzzy recall with FFF
 
@@ -239,9 +257,9 @@ agent may be writing.
 
 ## Update, troubleshoot, and remove
 
-Re-run the installer to update. It idempotently keeps `memo` on your user
-PATH, replaces only the tool (and the Windows launcher), then runs `memo init`;
-existing logs, summaries, and configuration remain untouched.
+Re-run the installer to update. It idempotently keeps `memo` and its shell
+completion configured, replaces only the tool (and the Windows launcher), then
+runs `memo init`; existing logs, summaries, and configuration remain untouched.
 
 Start troubleshooting with:
 

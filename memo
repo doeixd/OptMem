@@ -8,6 +8,7 @@ Start here:
   {memo} init                    create global memory; print agent instructions
   {memo} setup [--create|--no-create] [FILE ...]
                                  update AGENTS.md and CLAUDE.md safely
+  {memo} completion <shell>      print bash, zsh, fish, or powershell setup
   {memo} doctor                  check installation, scope, stores, and FFF
   {memo} wake [part [T]]         read global then project memory
 
@@ -633,6 +634,209 @@ is already known, and its notes would arrive duplicated and incorrectly.
 When you spawn one, write: `You are a subagent. Don't run memo.`
 """
 
+COMPLETIONS = {
+    "bash": r"""# Bash completion for memo
+_memo_compgen() {
+    COMPREPLY=()
+    local candidate
+    while IFS= read -r candidate; do
+        COMPREPLY+=("$candidate")
+    done < <(compgen "$@")
+}
+
+_memo_completion() {
+    local cur cmd word i
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    cmd=""
+    for ((i=1; i<COMP_CWORD; i++)); do
+        word="${COMP_WORDS[i]}"
+        case "$word" in
+            --global|--then-project) ;;
+            *) cmd="$word"; break ;;
+        esac
+    done
+
+    if [ -z "$cmd" ]; then
+        _memo_compgen -W "--global init setup completion doctor wake note recall zoom nap forget config import" -- "$cur"
+        return
+    fi
+    case "$cmd" in
+        setup)
+            if [[ "$cur" == --* ]]; then
+                _memo_compgen -W "--create --no-create" -- "$cur"
+            else
+                _memo_compgen -f -- "$cur"
+            fi
+            ;;
+        completion)
+            _memo_compgen -W "bash zsh fish powershell" -- "$cur"
+            ;;
+        recall)
+            _memo_compgen -W "--fuzzy" -- "$cur"
+            ;;
+        config)
+            _memo_compgen -W "WAKE_LINES= ENTRY_CHARS= PART_CHARS= PART_LINES=" -- "$cur"
+            ;;
+        import)
+            _memo_compgen -f -- "$cur"
+            ;;
+    esac
+}
+complete -F _memo_completion memo""",
+    "zsh": r"""#compdef memo
+# Zsh completion for memo
+_memo() {
+    local cmd word state
+    local -a commands
+    commands=(
+        'init:create global memory and print agent instructions'
+        'setup:add or update agent instruction files'
+        'completion:print a shell completion script'
+        'doctor:diagnose installation and memory scope'
+        'wake:read global then project memory'
+        'note:record one durable memory'
+        'recall:search recorded memories'
+        'zoom:open a summary node'
+        'nap:complete a requested compression'
+        'forget:discard a bad summary'
+        'config:inspect or change memory limits'
+        'import:bootstrap an empty memory'
+    )
+    if (( CURRENT > 2 )); then
+        for word in ${words[2,$((CURRENT - 1))]}; do
+            case "$word" in
+                --global|--then-project) ;;
+                *) cmd="$word"; break ;;
+            esac
+        done
+    fi
+    if [[ -z "$cmd" ]]; then
+        _arguments '--global[use global memory]' '1:command:->command'
+        [[ "$state" == command ]] && _describe 'command' commands
+        return
+    fi
+    case "$cmd" in
+        setup)
+            _arguments '--create[create missing files]' \
+                '--no-create[skip missing files]' '*:instruction file:_files'
+            ;;
+        completion) _values 'shell' bash zsh fish powershell ;;
+        recall) _arguments '--fuzzy[use typo-tolerant FFF recall]' '*:query:' ;;
+        config)
+            _values 'setting' 'WAKE_LINES=' 'ENTRY_CHARS=' 'PART_CHARS=' 'PART_LINES='
+            ;;
+        import) _arguments '1:memory file:_files' ;;
+    esac
+}
+compdef _memo memo""",
+    "fish": r"""# Fish completion for memo
+function __memo_needs_command
+    for word in (commandline -opc)[2..-1]
+        switch $word
+            case --global --then-project
+            case '*'
+                return 1
+        end
+    end
+    return 0
+end
+
+complete -c memo -n __memo_needs_command -l global -d 'Use global memory'
+complete -c memo -n __memo_needs_command -a init -d 'Create global memory and print instructions'
+complete -c memo -n __memo_needs_command -a setup -d 'Add or update agent instruction files'
+complete -c memo -n __memo_needs_command -a completion -d 'Print a shell completion script'
+complete -c memo -n __memo_needs_command -a doctor -d 'Diagnose installation and memory scope'
+complete -c memo -n __memo_needs_command -a wake -d 'Read global then project memory'
+complete -c memo -n __memo_needs_command -a note -d 'Record one durable memory'
+complete -c memo -n __memo_needs_command -a recall -d 'Search recorded memories'
+complete -c memo -n __memo_needs_command -a zoom -d 'Open a summary node'
+complete -c memo -n __memo_needs_command -a nap -d 'Complete a requested compression'
+complete -c memo -n __memo_needs_command -a forget -d 'Discard a bad summary'
+complete -c memo -n __memo_needs_command -a config -d 'Inspect or change memory limits'
+complete -c memo -n __memo_needs_command -a import -d 'Bootstrap an empty memory'
+complete -c memo -n 'contains -- setup (commandline -opc)' -l create -d 'Create missing files'
+complete -c memo -n 'contains -- setup (commandline -opc)' -l no-create -d 'Skip missing files'
+complete -c memo -n 'contains -- completion (commandline -opc)' -a 'bash zsh fish powershell'
+complete -c memo -n 'contains -- recall (commandline -opc)' -l fuzzy -d 'Use typo-tolerant FFF recall'
+complete -c memo -n 'contains -- config (commandline -opc)' -a 'WAKE_LINES= ENTRY_CHARS= PART_CHARS= PART_LINES='""",
+    "powershell": r"""# PowerShell completion for memo
+Register-ArgumentCompleter -Native -CommandName memo -ScriptBlock {
+    param($wordToComplete, $commandAst, $cursorPosition)
+
+    $commands = [ordered]@{
+        init       = 'Create global memory and print agent instructions'
+        setup      = 'Add or update agent instruction files'
+        completion = 'Print a shell completion script'
+        doctor     = 'Diagnose installation and memory scope'
+        wake       = 'Read global then project memory'
+        note       = 'Record one durable memory'
+        recall     = 'Search recorded memories'
+        zoom       = 'Open a summary node'
+        nap        = 'Complete a requested compression'
+        forget     = 'Discard a bad summary'
+        config     = 'Inspect or change memory limits'
+        import     = 'Bootstrap an empty memory'
+    }
+    $tokens = @($commandAst.CommandElements | Select-Object -Skip 1 |
+        ForEach-Object { $_.Extent.Text.Trim("'`"") })
+    $command = $tokens | Where-Object {
+        $commands.Contains($_)
+    } | Select-Object -First 1
+
+    if (-not $command) {
+        $candidates = @('--global') + @($commands.Keys)
+    } else {
+        $candidates = switch ($command) {
+            setup      { '--create', '--no-create' }
+            completion { 'bash', 'zsh', 'fish', 'powershell' }
+            recall     { '--fuzzy' }
+            config     { 'WAKE_LINES=', 'ENTRY_CHARS=', 'PART_CHARS=', 'PART_LINES=' }
+            default    { @() }
+        }
+    }
+    foreach ($candidate in $candidates) {
+        if ($candidate -like "$wordToComplete*") {
+            $tip = if ($commands.Contains($candidate)) {
+                $commands[$candidate]
+            } else {
+                $candidate
+            }
+            [System.Management.Automation.CompletionResult]::new(
+                $candidate, $candidate, 'ParameterValue', $tip)
+        }
+    }
+    if (($command -eq 'setup' -and -not $wordToComplete.StartsWith('--')) -or
+        $command -eq 'import') {
+        $typedPath = $wordToComplete.Trim("'`"")
+        $parent = Split-Path -Parent $typedPath
+        $leaf = Split-Path -Leaf $typedPath
+        $searchDir = if ($parent) { $parent } else { '.' }
+        if (Test-Path -LiteralPath $searchDir -PathType Container) {
+            Get-ChildItem -LiteralPath $searchDir | Where-Object {
+                $_.Name.StartsWith(
+                    $leaf, [System.StringComparison]::OrdinalIgnoreCase)
+            } | ForEach-Object {
+                $display = if ($parent) {
+                    Join-Path $parent $_.Name
+                } else {
+                    $_.Name
+                }
+                if ($_.PSIsContainer) {
+                    $display += [System.IO.Path]::DirectorySeparatorChar
+                }
+                $completionText = if ($display -match '\s') {
+                    "'$($display.Replace("'", "''"))'"
+                } else {
+                    $display
+                }
+                [System.Management.Automation.CompletionResult]::new(
+                    $completionText, $_.Name, 'ProviderItem', $_.FullName)
+            }
+        }
+    }
+}""",
+}
+
 AGENT_START = "<!-- OPTMEM:START -->"
 AGENT_END = "<!-- OPTMEM:END -->"
 
@@ -767,6 +971,13 @@ def cmd_setup(d, args):
                   % pretty(path))
         else:
             print("Already configured: %s." % pretty(path))
+
+
+def cmd_completion(d, args):
+    """Print a completion script without opening or creating memory."""
+    if len(args) != 1 or args[0].lower() not in COMPLETIONS:
+        die("Usage: %s completion <bash|zsh|fish|powershell>" % TOOL)
+    print(COMPLETIONS[args[0].lower()].rstrip())
 
 
 def cmd_init(d, args):
@@ -1209,7 +1420,8 @@ def cmd_doctor(d, args):
         print("the tool's full path.")
 
 
-COMMANDS = {"init": cmd_init, "setup": cmd_setup, "wake": cmd_wake,
+COMMANDS = {"init": cmd_init, "setup": cmd_setup,
+            "completion": cmd_completion, "wake": cmd_wake,
             "note": cmd_note,
             "nap": cmd_nap, "recall": cmd_recall, "zoom": cmd_zoom,
             "forget": cmd_forget, "config": cmd_config, "import": cmd_import,
@@ -1251,6 +1463,9 @@ def main():
             return
         if cmd == "setup":
             cmd_setup(instruction_dir(), argv[1:])
+            return
+        if cmd == "completion":
+            cmd_completion(None, argv[1:])
             return
         if cmd == "wake" and not SCOPE_GLOBAL and not os.environ.get("MEMORY_DIR"):
             wake_both(argv[1:])

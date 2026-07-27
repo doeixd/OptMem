@@ -156,12 +156,32 @@ helped = subprocess.run(memo + ["--help"], capture_output=True, text=True,
                         env=fresh)
 check(helped.returncode == 0 and "Usage:" in helped.stdout
       and "setup [--create|--no-create] [FILE ...]" in helped.stdout
+      and "completion <shell>" in helped.stdout
       and "doctor" in helped.stdout and "recall --fuzzy" in helped.stdout,
       "--help is not a useful command overview:\n" + helped.stdout + helped.stderr)
 help_alias = subprocess.run(memo + ["help"], capture_output=True, text=True,
                             env=fresh)
 check(help_alias.returncode == 0 and help_alias.stdout == helped.stdout,
       "help and --help disagree")
+completion_signatures = {
+    "bash": "complete -F _memo_completion memo",
+    "zsh": "compdef _memo memo",
+    "fish": "complete -c memo",
+    "powershell": "Register-ArgumentCompleter -Native -CommandName memo",
+}
+for shell, signature in completion_signatures.items():
+    completed = subprocess.run(memo + ["completion", shell],
+                               capture_output=True, text=True, env=fresh)
+    check(completed.returncode == 0 and signature in completed.stdout,
+          "%s completion is missing or invalid:\n%s%s"
+          % (shell, completed.stdout, completed.stderr))
+bad_completion = subprocess.run(memo + ["completion", "tcsh"],
+                                capture_output=True, text=True, env=fresh)
+check(bad_completion.returncode == 1
+      and "<bash|zsh|fish|powershell>" in bad_completion.stderr,
+      "an unsupported completion shell did not show valid choices")
+check(not os.path.exists(os.path.join(fresh["HOME"], ".optmem", "memory")),
+      "printing a completion script created a memory store")
 unknown = subprocess.run(memo + ["wat"], capture_output=True, text=True,
                          env=fresh)
 check(unknown.returncode == 1 and "No such command: wat" in unknown.stderr

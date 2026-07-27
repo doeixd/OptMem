@@ -79,5 +79,26 @@ if (-not $OnProcessPath) {
     $env:Path = "$InstallDir;$env:Path"
 }
 Write-Host "The 'memo' command is available in this PowerShell session."
+
+$CompletionScript = Join-Path $InstallDir 'memo-completion.ps1'
+& $Launcher completion powershell |
+    Set-Content -LiteralPath $CompletionScript -Encoding UTF8
+if ($LASTEXITCODE -ne 0) {
+    throw 'Could not generate PowerShell completion.'
+}
+$ProfilePath = $PROFILE.CurrentUserAllHosts
+$ProfileDir = Split-Path -Parent $ProfilePath
+New-Item -ItemType Directory -Force -Path $ProfileDir | Out-Null
+$CompletionSource = ". '$($CompletionScript.Replace("'", "''"))'"
+$CompletionConfigured = Test-Path -LiteralPath $ProfilePath -PathType Leaf
+if ($CompletionConfigured) {
+    $CompletionConfigured = [bool](Select-String -LiteralPath $ProfilePath `
+        -SimpleMatch $CompletionSource -Quiet)
+}
+if (-not $CompletionConfigured) {
+    Add-Content -LiteralPath $ProfilePath -Value "`n# OptMem completion`n$CompletionSource"
+}
+. $CompletionScript
+Write-Host "Installed PowerShell completion at $CompletionScript."
 Write-Host ''
 & $Launcher init

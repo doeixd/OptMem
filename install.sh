@@ -63,6 +63,31 @@ case ":${PATH:-}:" in
   *":$DIR:"*) ;;
   *) PATH="$DIR:${PATH:-}"; export PATH ;;
 esac
+
+case "$SHELL_NAME" in
+  bash)
+    COMPLETION_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions"
+    mkdir -p "$COMPLETION_DIR"
+    "$DIR/memo" completion bash > "$COMPLETION_DIR/memo"
+    echo "Installed Bash completion at $COMPLETION_DIR/memo."
+    ;;
+  zsh)
+    COMPLETION_DIR="$HOME/.zfunc"
+    mkdir -p "$COMPLETION_DIR"
+    "$DIR/memo" completion zsh > "$COMPLETION_DIR/_memo"
+    ZSH_COMPLETION_LINE='fpath=("$HOME/.zfunc" $fpath); autoload -Uz compinit && compinit'
+    if ! grep -F "$ZSH_COMPLETION_LINE" "$PROFILE" >/dev/null 2>&1; then
+      printf '\n# OptMem completion\n%s\n' "$ZSH_COMPLETION_LINE" >> "$PROFILE"
+    fi
+    echo "Installed Zsh completion at $COMPLETION_DIR/_memo."
+    ;;
+  fish)
+    COMPLETION_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions"
+    mkdir -p "$COMPLETION_DIR"
+    "$DIR/memo" completion fish > "$COMPLETION_DIR/memo.fish"
+    echo "Installed Fish completion at $COMPLETION_DIR/memo.fish."
+    ;;
+esac
 echo "Open a new shell to use 'memo', or run: export PATH=\"\$HOME/.optmem:\$PATH\""
 echo
 "$DIR/memo" init
