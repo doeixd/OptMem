@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OptMem: permanent, local, append-only memory for AI agents.
+"""OptMem: permanent, local, append-first memory for AI agents.
 
 Usage:
   {memo} [--global] <command> [arguments]
@@ -11,22 +11,30 @@ Start here:
   {memo} completion <shell>      print bash, zsh, fish, or powershell setup
   {memo} upgrade                 download and validate the latest release
   {memo} uninstall               remove the tool; preserve every memory
-  {memo} doctor                  check installation, scope, stores, FFF, QMD
+  {memo} doctor [--deep]         diagnose setup; optionally verify full stores
   {memo} qmd [help]              explain or manage optional semantic recall
   {memo} wake [part [T]]         read global then project memory
 
 Remember and retrieve:
   {memo} note "<one line>"       save to this project's memory
+  {memo} show <id>               show one raw memory and later references
+  {memo} amend <id> "<one line>" append a corrected replacement
+  {memo} retract <id> "<reason>" mark a memory no longer authoritative
   {memo} recall [options] <query>
                                  exact, fuzzy, or optional semantic recall
   {memo} zoom [--depth N] <range>
                                  open one or more summary-tree levels
 
 Maintain:
-  {memo} nap [id "..."]          complete a requested compression
-  {memo} forget <lo>-<hi>        discard a bad summary; nap rebuilds it
+  {memo} nap [id "..."|--batch N|--apply FILE]
+                                 complete one or more compressions
+  {memo} resummarize <lo>-<hi>   discard a bad summary; nap rebuilds it
+  {memo} redact <id> --force     permanently remove one sensitive payload
   {memo} config [NAME=N]         inspect or change this store's sizes
-  {memo} import <file>           bulk-load dated memories (bootstrap only)
+  {memo} export [--with-ids] [file]
+                                 write a portable history
+  {memo} import [--dry-run] <file>
+                                 restore into an empty store
 
 Scope:
   Commands use the project in the current directory. Put --global before a
@@ -50,6 +58,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 from collections import deque
 
 
@@ -111,6 +120,7 @@ RAW_MAX = 16  # blocks up to this many memories compress from the raw log
 MAX_RECALL_LIMIT = 1000
 MAX_RECALL_CONTEXT = 20
 MAX_ZOOM_DEPTH = 6
+MAX_SHOW_REFERENCES = 50
 QMD_SEGMENT_SIZE = 16
 QMD_INDEX = "optmem"
 QMD_QUERY_SEGMENTS = 3
@@ -194,6 +204,118 @@ def git(*args):
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
+def canonical_origin(url):
+    """A host-aware repository identity, independent of transport syntax."""
+    value = url.strip()
+    if not value:
+        return ""
+    host, path = "", ""
+    if "://" in value:
+        parsed = urllib.parse.urlsplit(value)
+        host = (parsed.hostname or "").lower()
+        try:
+            port = parsed.port
+        except ValueError:
+            return ""
+        defaults = {"http": 80, "https": 443, "ssh": 22}
+        if port and port != defaults.get(parsed.scheme.lower()):
+            host += ":%d" % port
+        path = parsed.path
+    else:
+        match = re.match(r"^(?:[^@/\\:]+@)?([^/\\:]+):(.+)$", value)
+        if match and not re.match(r"^[A-Za-z]:[\\/]", value):
+            host, path = match.group(1).lower(), match.group(2)
+    if not host:
+        return ""
+    parts = [part for part in re.split(r"[/\\]+", path.strip("/\\"))
+             if part]
+    if parts:
+        parts[-1] = re.sub(r"\.git/*$", "", parts[-1])
+    if len(parts) < 2:
+        return ""
+    return host + "/" + "/".join(parts[-2:])
+
+
+def safe_origin_alias(url):
+    """Origin spelling without URL credentials, suitable for scope.json."""
+    value = url.strip()
+    if "://" in value:
+        parsed = urllib.parse.urlsplit(value)
+        host = parsed.hostname or ""
+        try:
+            port = parsed.port
+        except ValueError:
+            return canonical_origin(value)
+        netloc = host + (":%d" % port if port else "")
+        return urllib.parse.urlunsplit(
+            (parsed.scheme, netloc, parsed.path, "", ""))
+    match = re.match(r"^([^@/\\:]+)@([^/\\:]+):(.+)$", value)
+    if match and match.group(1).lower() not in ("git", "ssh"):
+        return "%s:%s" % (match.group(2), match.group(3))
+    return value
+
+
+def _scope_identity_path(d):
+    return os.path.join(d, "scope.json")
+
+
+def _read_scope_identity(d):
+    path = _scope_identity_path(d)
+    if not os.path.isfile(path) or os.path.islink(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            value = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(value, dict) or value.get("version") != 1 or
+            not isinstance(value.get("canonical"), str) or
+            not isinstance(value.get("aliases"), list) or
+            not all(isinstance(item, str) for item in value["aliases"])):
+        return None
+    return value
+
+
+def _record_scope_identity(d):
+    """Claim a legacy owner/repo store for one host identity on first use.
+
+    A different host deliberately does not rewrite the claim. `doctor` then
+    exposes the collision while leaving the user's existing store untouched.
+    """
+    if SCOPE_GLOBAL or os.environ.get("MEMORY_DIR"):
+        return
+    raw = git("remote", "get-url", "origin")
+    canonical = canonical_origin(raw)
+    alias = safe_origin_alias(raw)
+    if not canonical:
+        return
+    identity_path = _scope_identity_path(d)
+    current = _read_scope_identity(d)
+    if current is not None:
+        if current["canonical"] != canonical or alias in current["aliases"]:
+            return
+    if current is None and os.path.lexists(identity_path):
+        return
+    lock = locked(d)
+    try:
+        current = _read_scope_identity(d)
+        if current is None and not os.path.lexists(identity_path):
+            encoded = (json.dumps({
+                "version": 1,
+                "canonical": canonical,
+                "aliases": [alias],
+            }, indent=2, sort_keys=True) + "\n").encode("utf-8")
+            _atomic_replace(identity_path, encoded, False)
+        elif (current is not None and current["canonical"] == canonical and
+              alias not in current["aliases"]):
+            current["aliases"].append(alias)
+            encoded = (json.dumps(
+                current, indent=2, sort_keys=True) + "\n").encode("utf-8")
+            _atomic_replace(identity_path, encoded, True)
+    finally:
+        lock.close()
+
+
 def scope_dir():
     """The memory of the project in $PWD. Keyed by the origin remote, reduced
     to owner/repo: every worktree and every host alias for one repo is one
@@ -201,7 +323,9 @@ def scope_dir():
     root = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
     url = git("remote", "get-url", "origin")
     if url:
-        parts = re.split(r"[:/]", re.sub(r"\.git/*$", "", url).rstrip("/"))
+        canonical = canonical_origin(url)
+        safe = canonical or safe_origin_alias(url)
+        parts = re.split(r"[:/]", re.sub(r"\.git/*$", "", safe).rstrip("/"))
         slug = os.path.join("repo", *parts[-2:])
     else:
         project = git("rev-parse", "--show-toplevel") or os.getcwd()
@@ -234,10 +358,16 @@ def store():
             die("No memory at %s.\nTo create one, run: %s init\n"
                 "To use an existing one, point MEMORY_DIR at it." % (d, ME))
         os.makedirs(d, exist_ok=True)
-    os.makedirs(os.path.join(d, "TREE"), exist_ok=True)
+    tree = os.path.join(d, "TREE")
+    if os.path.lexists(tree) and os.path.islink(tree):
+        die("Refusing symbolic-link TREE directory at %s." % pretty(tree))
+    os.makedirs(tree, exist_ok=True)
     p = os.path.join(d, "LOG.txt")
+    if os.path.lexists(p) and os.path.islink(p):
+        die("Refusing symbolic-link LOG.txt at %s." % pretty(p))
     if not os.path.exists(p):
         open(p, "a").close()
+    _record_scope_identity(d)
     return d
 
 
@@ -377,7 +507,7 @@ def tree_get(d, lo, hi):
     try:
         return rec.decode().rstrip() or None
     except UnicodeDecodeError:
-        die("The summary of #%d-%d is corrupt. Run: %s forget %d-%d"
+        die("The summary of #%d-%d is corrupt. Run: %s resummarize %d-%d"
             % (lo, hi - 1, ME, lo, hi - 1))
 
 
@@ -444,6 +574,44 @@ def log_append(d, items):
         lock.close()
 
 
+def log_import_empty(d, items):
+    """Append a portable history iff the store is still empty under lock."""
+    lock = locked(d)
+    try:
+        repair(log_path(d), LOG_REC)
+        if log_len(d):
+            return False
+        with open(log_path(d), "ab") as f:
+            for ident, (date, text) in enumerate(items):
+                f.write(pad("#%d %s %s" % (ident, date, text), LOG_REC))
+            f.flush()
+            os.fsync(f.fileno())
+        return True
+    finally:
+        lock.close()
+
+
+def log_redact(d, ident):
+    """Replace one payload in place while preserving its ID and date."""
+    lock = locked(d)
+    try:
+        repair(log_path(d), LOG_REC)
+        if ident >= log_len(d):
+            return None
+        old_ident, date, text = log_get(d, ident)
+        replacement = "[REDACTED BY USER]"
+        if text == replacement:
+            return old_ident, date, text, False
+        with open(log_path(d), "r+b") as f:
+            f.seek(ident * LOG_REC)
+            f.write(pad("#%d %s %s" % (ident, date, replacement), LOG_REC))
+            f.flush()
+            os.fsync(f.fileno())
+        return old_ident, date, text, True
+    finally:
+        lock.close()
+
+
 def tree_put(d, lo, hi, text):
     """Write block [lo,hi). Blocks are built in order, so this only ever
     appends one record to one level file."""
@@ -456,6 +624,30 @@ def tree_put(d, lo, hi, text):
             return False
         with open(p, "ab") as f:
             f.write(pad(text, TREE_REC))
+            f.flush()
+            os.fsync(f.fileno())
+        return True
+    finally:
+        lock.close()
+
+
+def tree_put_batch(d, blocks):
+    """Atomically append a validated run of summaries at one tree level."""
+    if not blocks:
+        return True
+    size = blocks[0][1] - blocks[0][0]
+    lock = locked(d)
+    try:
+        p = tree_path(d, size)
+        repair(p, TREE_REC)
+        have = count(p, TREE_REC)
+        expected = [(i * size, (i + 1) * size)
+                    for i in range(have, have + len(blocks))]
+        if [(lo, hi) for lo, hi, _ in blocks] != expected:
+            return False
+        payload = b"".join(pad(text, TREE_REC) for _, _, text in blocks)
+        with open(p, "ab") as f:
+            f.write(payload)
             f.flush()
             os.fsync(f.fileno())
         return True
@@ -478,6 +670,35 @@ def tree_drop(d, lo, hi):
                 with open(p, "r+b") as f:
                     f.truncate(k * TREE_REC)
             size *= 2
+        return gone
+    finally:
+        lock.close()
+
+
+def tree_invalidate_memory(d, ident):
+    """Remove every existing summary that could contain one raw memory."""
+    gone = []
+    lock = locked(d)
+    try:
+        root = os.path.join(d, "TREE")
+        if os.path.islink(root):
+            raise OSError("refusing symbolic-link TREE directory")
+        for name in sorted(os.listdir(root), key=lambda item: (
+                int(item) if item.isdigit() else sys.maxsize)):
+            if not name.isdigit():
+                continue
+            size = int(name)
+            if size < 2 or size & (size - 1):
+                continue
+            path, index = tree_path(d, size), ident // size
+            if os.path.islink(path):
+                raise OSError("refusing symbolic-link tree level %s" % name)
+            records_ = count(path, TREE_REC)
+            if records_ > index:
+                gone.extend((item * size, (item + 1) * size)
+                            for item in range(index, records_))
+                with open(path, "r+b") as output:
+                    output.truncate(index * TREE_REC)
         return gone
     finally:
         lock.close()
@@ -526,6 +747,40 @@ def check(text):
     return text
 
 
+def memory_id(value):
+    """Parse a user-facing stable memory ID, accepting either 42 or #42."""
+    match = re.fullmatch(r"#?(\d+)", value)
+    if not match:
+        die("'%s' is not a memory ID. Use a number such as 42 or #42." % value)
+    return int(match.group(1))
+
+
+def require_memory(d, value):
+    ident = memory_id(value)
+    total = log_len(d)
+    if ident >= total:
+        die("No memory #%d. This store contains %s, #%d to #%d."
+            % (ident, plural(total, "memory"), 0, total - 1)
+            if total else
+            "No memory #%d. This store is empty." % ident)
+    return ident
+
+
+_LIFECYCLE_REF = re.compile(r"^(Amends|Retracts) #(\d+):\s+")
+
+
+def _append_lifecycle(d, action, target, text):
+    ident = require_memory(d, target)
+    replacement = check(text)
+    full = check("%s #%d: %s" % (action, ident, replacement))
+    created = log_append(d, [(datetime.date.today().isoformat(), full)])
+    print("%s #%d with #%d." % (
+        "Amended" if action == "Amends" else "Retracted", ident, created))
+    nap = next_nap(d, created + 1)
+    if nap:
+        print("\n" + nap)
+
+
 # ---------------------------------------------------------------- naps
 
 def pending(d, T, limit=None):
@@ -565,7 +820,7 @@ def nap_prompt(d, lo, hi, left):
                 # pending() lists a block only after its halves settled, so
                 # a missing half is a blank record -- a corrupt write. Drop
                 # it and the next nap rebuilds it.
-                die("The summary of #%d-%d is blank. Run: %s forget %d-%d"
+                die("The summary of #%d-%d is blank. Run: %s resummarize %d-%d"
                     % (a, b - 1, ME, a, b - 1))
             halves.append("  #%d-%d %s" % (a, b - 1, s))
         body = "\n".join(halves)
@@ -577,7 +832,10 @@ def nap_prompt(d, lo, hi, left):
             "decisions, outcomes, constraints, causal links, and useful "
             "failure reasons. Drop transient status, incidental chronology, and "
             "repetition. Use specific names; invent nothing and never imply "
-            "a link between unrelated facts.\n\n"
+            "a link between unrelated facts. Later amendments, corrections, "
+            "and retractions override the records they reference: preserve the "
+            "final outcome, and keep earlier information only when its history "
+            "or failure reason remains useful.\n\n"
             "%s\n%s\n"
             "Run: %s nap %d-%d \"<your line>\""
             % (lo, hi - 1, ENTRY_CHARS, body, tail, ME, lo, hi - 1))
@@ -589,6 +847,58 @@ def next_nap(d, T):
         return None
     lo, hi = todo[0]
     return nap_prompt(d, lo, hi, pending_count(d, T) - 1)
+
+
+def batch_pending(d, T, limit):
+    """A contiguous run from the smallest pending level.
+
+    These jobs are independent and can be summarized together. Keeping one
+    level per batch also lets --apply commit the whole batch in one fsync.
+    """
+    size = 2
+    while size <= T:
+        have, needed = count(tree_path(d, size), TREE_REC), T // size
+        if have < needed:
+            return [(index * size, (index + 1) * size)
+                    for index in range(have, min(needed, have + limit))]
+        size *= 2
+    return []
+
+
+def batch_nap_prompt(d, jobs, left):
+    lines = [
+        "Compress each range independently into one line of at most %d UTF-8 "
+        "bytes." % ENTRY_CHARS,
+        "Preserve durable decisions, outcomes, constraints, causal links, and "
+        "useful failure reasons. Later amendments, corrections, and "
+        "retractions override what they reference. Drop transient status and "
+        "repetition; invent nothing.",
+        "",
+    ]
+    for lo, hi in jobs:
+        lines.append("%d-%d:" % (lo, hi - 1))
+        if hi - lo <= RAW_MAX:
+            lines.extend("  #%d %s %s" % entry
+                         for entry in log_slice(d, lo, hi))
+        else:
+            mid = (lo + hi) // 2
+            for a, b in ((lo, mid), (mid, hi)):
+                summary = tree_get(d, a, b)
+                if summary is None:
+                    die("The summary of #%d-%d is blank. Run: "
+                        "%s resummarize %d-%d"
+                        % (a, b - 1, ME, a, b - 1))
+                lines.append("  #%d-%d %s" % (a, b - 1, summary))
+        lines.append("")
+    lines.extend([
+        "Write a UTF-8 file with one TAB-separated result per line:",
+        "  <range><TAB><one-line summary>",
+        "Then run: %s nap --apply <file>" % ME,
+    ])
+    if left:
+        lines.append("%s will remain after this batch." %
+                     plural(left, "compression"))
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------- commands
@@ -607,7 +917,11 @@ Without it you do not know who you are, or what was decided and tried.
 ### Mental model
 
 Each scope is an append-only log. `note` adds one raw memory with a stable
-`#ID`; raw memories remain the source of truth and are never rewritten.
+`#ID`; raw memories remain the source of truth. Later memories may cite earlier
+`#IDs` when that makes a durable fact or decision unambiguous. `amend` appends a
+corrected replacement; `retract` appends that an earlier memory is no longer
+authoritative. The earlier record remains useful history. Only explicit,
+user-directed `redact --force` rewrites a raw payload, to erase sensitive text.
 Adjacent memories are also represented by a binary tree of lossy one-line
 summaries. `wake` shows a bounded frontier from that tree—not full history—
 with coarser summaries for older history and finer detail toward the present.
@@ -636,6 +950,14 @@ lesson -- write it to that project.
 Do not register redundant memories. Never record secrets, credentials,
 authentication material, or raw sensitive data.
 
+If a durable memory changes, do not contradict it with an unexplained note.
+Use `{memo} amend <id> "<replacement>"`; use
+`{memo} retract <id> "<reason>"` when it has no replacement. Ordinary memories
+may reference earlier `#IDs` to anchor stable facts and reasoning. Use
+`{memo} show <id>` when you need the exact record and its later references.
+Redaction is not correction: only the user may request it, and it exists for
+content that must actually be erased.
+
 If `{memo} note` asks a compression, follow its prompt and run the exact
 `nap` command before your next action.
 A compression is a lossy retrieval cue for the supplied range, not a
@@ -643,7 +965,9 @@ deletion: the raw memories remain searchable. Write one self-contained line.
 Preserve durable decisions, outcomes, constraints, causal links, preferences,
 and useful failure reasons. Drop transient status, incidental chronology, and
 repetition. Use specific names; invent nothing and never imply a link between
-unrelated facts.
+unrelated facts. Later amendments, corrections, and retractions override the
+records they reference. Preserve the final outcome; retain the earlier account
+only when its history or failure reason remains useful.
 
 Never edit or delete a memory directory: the tool manages it.
 
@@ -696,7 +1020,7 @@ _memo_completion() {
     done
 
     if [ -z "$cmd" ]; then
-        _memo_compgen -W "--global init setup completion upgrade uninstall doctor qmd wake note recall zoom nap forget config import" -- "$cur"
+        _memo_compgen -W "--global init setup completion upgrade uninstall doctor qmd wake note show amend retract recall zoom nap resummarize forget redact config export import" -- "$cur"
         return
     fi
     case "$cmd" in
@@ -725,11 +1049,35 @@ _memo_completion() {
         zoom)
             _memo_compgen -W "--depth" -- "$cur"
             ;;
+        doctor)
+            _memo_compgen -W "--deep" -- "$cur"
+            ;;
+        nap)
+            if [[ " ${COMP_WORDS[*]} " == *" --apply "* ]]; then
+                _memo_compgen -f -- "$cur"
+            else
+                _memo_compgen -W "--batch --apply" -- "$cur"
+            fi
+            ;;
+        redact)
+            _memo_compgen -W "--force" -- "$cur"
+            ;;
+        export)
+            if [[ "$cur" == --* ]]; then
+                _memo_compgen -W "--with-ids" -- "$cur"
+            else
+                _memo_compgen -f -- "$cur"
+            fi
+            ;;
         config)
             _memo_compgen -W "WAKE_LINES= ENTRY_CHARS= PART_CHARS= PART_LINES=" -- "$cur"
             ;;
         import)
-            _memo_compgen -f -- "$cur"
+            if [[ "$cur" == --* ]]; then
+                _memo_compgen -W "--dry-run" -- "$cur"
+            else
+                _memo_compgen -f -- "$cur"
+            fi
             ;;
     esac
 }
@@ -749,12 +1097,18 @@ _memo() {
         'qmd:manage optional QMD semantic recall'
         'wake:read global then project memory'
         'note:record one durable memory'
+        'show:show one raw memory and later references'
+        'amend:append a corrected replacement'
+        'retract:mark a memory no longer authoritative'
         'recall:search recorded memories'
         'zoom:open a summary node'
         'nap:complete a requested compression'
-        'forget:discard a bad summary'
+        'resummarize:discard a bad summary'
+        'forget:compatibility alias for resummarize'
+        'redact:permanently remove sensitive text'
         'config:inspect or change memory limits'
-        'import:bootstrap an empty memory'
+        'export:write a portable memory history'
+        'import:restore into an empty memory'
     )
     if (( CURRENT > 2 )); then
         for word in ${words[2,$((CURRENT - 1))]}; do
@@ -795,10 +1149,20 @@ _memo() {
         zoom)
             _arguments '--depth=[tree levels to open]:depth:' '1:block id:'
             ;;
+        doctor) _arguments '--deep[verify the active store fully]' ;;
+        nap)
+            _arguments '--batch=[print several independent jobs]:count:' \
+                '--apply=[apply a TAB-separated summary file]:file:_files'
+            ;;
+        redact) _arguments '--force[permanently erase the payload]' '1:memory id:' ;;
+        export)
+            _arguments '--with-ids[include inspection IDs; not importable]' \
+                '1:output file:_files'
+            ;;
         config)
             _values 'setting' 'WAKE_LINES=' 'ENTRY_CHARS=' 'PART_CHARS=' 'PART_LINES='
             ;;
-        import) _arguments '1:memory file:_files' ;;
+        import) _arguments '--dry-run[validate without writing]' '1:memory file:_files' ;;
     esac
 }
 compdef _memo memo""",
@@ -824,12 +1188,18 @@ complete -c memo -n __memo_needs_command -a doctor -d 'Diagnose installation and
 complete -c memo -n __memo_needs_command -a qmd -d 'Manage optional QMD semantic recall'
 complete -c memo -n __memo_needs_command -a wake -d 'Read global then project memory'
 complete -c memo -n __memo_needs_command -a note -d 'Record one durable memory'
+complete -c memo -n __memo_needs_command -a show -d 'Show one raw memory and later references'
+complete -c memo -n __memo_needs_command -a amend -d 'Append a corrected replacement'
+complete -c memo -n __memo_needs_command -a retract -d 'Mark a memory no longer authoritative'
 complete -c memo -n __memo_needs_command -a recall -d 'Search recorded memories'
 complete -c memo -n __memo_needs_command -a zoom -d 'Open a summary node'
 complete -c memo -n __memo_needs_command -a nap -d 'Complete a requested compression'
-complete -c memo -n __memo_needs_command -a forget -d 'Discard a bad summary'
+complete -c memo -n __memo_needs_command -a resummarize -d 'Discard a bad summary'
+complete -c memo -n __memo_needs_command -a forget -d 'Compatibility alias for resummarize'
+complete -c memo -n __memo_needs_command -a redact -d 'Permanently remove sensitive text'
 complete -c memo -n __memo_needs_command -a config -d 'Inspect or change memory limits'
-complete -c memo -n __memo_needs_command -a import -d 'Bootstrap an empty memory'
+complete -c memo -n __memo_needs_command -a export -d 'Write a portable memory history'
+complete -c memo -n __memo_needs_command -a import -d 'Restore into an empty memory'
 complete -c memo -n 'contains -- setup (commandline -opc)' -l create -d 'Create missing files'
 complete -c memo -n 'contains -- setup (commandline -opc)' -l no-create -d 'Skip missing files'
 complete -c memo -n 'contains -- completion (commandline -opc)' -a 'bash zsh fish powershell'
@@ -839,6 +1209,12 @@ complete -c memo -n 'contains -- recall (commandline -opc)' -l fast -d 'Skip QMD
 complete -c memo -n 'contains -- recall (commandline -opc)' -l limit -r -d 'Maximum matching memories'
 complete -c memo -n 'contains -- recall (commandline -opc)' -l context -r -d 'Neighboring memories on each side'
 complete -c memo -n 'contains -- zoom (commandline -opc)' -l depth -r -d 'Tree levels to open'
+complete -c memo -n 'contains -- doctor (commandline -opc)' -l deep -d 'Verify the active store fully'
+complete -c memo -n 'contains -- nap (commandline -opc)' -l batch -r -d 'Print several independent jobs'
+complete -c memo -n 'contains -- nap (commandline -opc)' -l apply -r -d 'Apply a TAB-separated summary file'
+complete -c memo -n 'contains -- redact (commandline -opc)' -l force -d 'Permanently erase the payload'
+complete -c memo -n 'contains -- export (commandline -opc)' -l with-ids -d 'Include inspection IDs'
+complete -c memo -n 'contains -- import (commandline -opc)' -l dry-run -d 'Validate without writing'
 complete -c memo -n 'contains -- qmd (commandline -opc)' -a 'enable status sync rebuild config disable help'
 complete -c memo -n 'contains -- qmd (commandline -opc); and contains -- config (commandline -opc)' -a 'FALLBACK=on FALLBACK=off'
 complete -c memo -n 'contains -- qmd (commandline -opc); and contains -- disable (commandline -opc)' -l purge -d 'Remove the disposable projection'
@@ -857,12 +1233,18 @@ Register-ArgumentCompleter -Native -CommandName memo -ScriptBlock {
         qmd        = 'Manage optional QMD semantic recall'
         wake       = 'Read global then project memory'
         note       = 'Record one durable memory'
+        show       = 'Show one raw memory and later references'
+        amend      = 'Append a corrected replacement'
+        retract    = 'Mark a memory no longer authoritative'
         recall     = 'Search recorded memories'
         zoom       = 'Open a summary node'
         nap        = 'Complete a requested compression'
-        forget     = 'Discard a bad summary'
+        resummarize = 'Discard a bad summary'
+        forget     = 'Compatibility alias for resummarize'
+        redact     = 'Permanently remove sensitive text'
         config     = 'Inspect or change memory limits'
-        import     = 'Bootstrap an empty memory'
+        export     = 'Write a portable memory history'
+        import     = 'Restore into an empty memory'
     }
     $tokens = @($commandAst.CommandElements | Select-Object -Skip 1 |
         ForEach-Object { $_.Extent.Text.Trim("'`"") })
@@ -887,6 +1269,11 @@ Register-ArgumentCompleter -Native -CommandName memo -ScriptBlock {
                 }
             }
             zoom       { '--depth' }
+            doctor     { '--deep' }
+            nap        { '--batch', '--apply' }
+            redact     { '--force' }
+            export     { '--with-ids' }
+            import     { '--dry-run' }
             config     { 'WAKE_LINES=', 'ENTRY_CHARS=', 'PART_CHARS=', 'PART_LINES=' }
             default    { @() }
         }
@@ -903,7 +1290,8 @@ Register-ArgumentCompleter -Native -CommandName memo -ScriptBlock {
         }
     }
     if (($command -eq 'setup' -and -not $wordToComplete.StartsWith('--')) -or
-        $command -eq 'import') {
+        $command -in @('import', 'export') -or
+        ($command -eq 'nap' -and $tokens -contains '--apply')) {
         $typedPath = $wordToComplete.Trim("'`"")
         $parent = Split-Path -Parent $typedPath
         $leaf = Split-Path -Leaf $typedPath
@@ -1419,7 +1807,7 @@ def cmd_wake(d, args, tail=True, continuation=None):
             if s is None:
                 # Nothing is pending, so the record exists but is blank -- a
                 # corrupt write. Drop it and the next nap rebuilds it.
-                die("The summary of #%d-%d is blank. Run: %s forget %d-%d"
+                die("The summary of #%d-%d is blank. Run: %s resummarize %d-%d"
                     % (lo, hi - 1, ME, lo, hi - 1))
             lines.append("#%d-%d %s" % (lo, hi - 1, s))
     parts = paginate(lines)
@@ -1489,8 +1877,92 @@ def cmd_note(d, args):
         print("\n" + nap)
 
 
+def cmd_show(d, args):
+    if len(args) != 1:
+        die("usage: %s show <id>" % ME)
+    ident = require_memory(d, args[0])
+    print("#%d %s %s" % log_get(d, ident))
+    pattern = re.compile(r"(?<!\d)#%d(?!\d)" % ident)
+    later, found = deque(maxlen=MAX_SHOW_REFERENCES), 0
+    for entry in log_scan(d):
+        if entry[0] > ident and pattern.search(entry[2]):
+            later.append(entry)
+            found += 1
+    if later:
+        print("Later references%s:" %
+              (" (latest %d of %d)" % (len(later), found)
+               if found > len(later) else ""))
+        for entry in later:
+            print("#%d %s %s" % entry)
+
+
+def cmd_amend(d, args):
+    if len(args) != 2:
+        die("usage: %s amend <id> \"<corrected replacement>\"" % ME)
+    _append_lifecycle(d, "Amends", args[0], args[1])
+
+
+def cmd_retract(d, args):
+    if len(args) != 2:
+        die("usage: %s retract <id> \"<reason>\"" % ME)
+    _append_lifecycle(d, "Retracts", args[0], args[1])
+
+
+def _nap_apply(d, path):
+    try:
+        source = open(path, encoding="utf-8").read().splitlines()
+    except UnicodeDecodeError:
+        die("%s is not UTF-8 text." % pretty(path))
+    rows = []
+    for number, line in enumerate(source, 1):
+        if not line.strip():
+            continue
+        block, tab, summary = line.partition("\t")
+        if not tab:
+            die("line %d: expected <range><TAB><one-line summary>." % number)
+        lo, hi = block_id(block.strip())
+        rows.append((lo, hi, check(summary)))
+    if not rows:
+        die("%s has no summaries." % pretty(path))
+    T = log_len(d)
+    expected = batch_pending(d, T, len(rows))
+    actual = [(lo, hi) for lo, hi, _ in rows]
+    if actual != expected:
+        wanted = ", ".join("%d-%d" % (lo, hi - 1)
+                           for lo, hi in expected) or "none"
+        die("Batch is stale or out of order. Expected: %s. Run: %s nap "
+            "--batch %d" % (wanted, ME, len(rows)))
+    if not tree_put_batch(d, rows):
+        die("The compression queue changed while applying the batch. Run: "
+            "%s nap --batch %d" % (ME, len(rows)))
+    print("Saved %s." % plural(len(rows), "summary"))
+    left = pending_count(d, T)
+    if left:
+        print("%s %s. Run: %s nap --batch %d"
+              % (plural(left, "compression"),
+                 "remains" if left == 1 else "remain", ME, len(rows)))
+    else:
+        print("Nothing left to compress.")
+
+
 def cmd_nap(d, args):
     T, said = log_len(d), False
+    if args and args[0] == "--batch":
+        if (len(args) != 2 or not args[1].isdigit() or
+                not 1 <= int(args[1]) <= 64):
+            die("usage: %s nap --batch <1-64>" % ME)
+        jobs = batch_pending(d, T, int(args[1]))
+        if not jobs:
+            print("Nothing left to compress.")
+            return
+        print(batch_nap_prompt(
+            d, jobs, pending_count(d, T) - len(jobs)))
+        return
+    if args and args[0] == "--apply":
+        if len(args) != 2:
+            die("usage: %s nap --apply <UTF-8 file>" % ME)
+        _nap_apply(d, args[1])
+        return
     if args:
         said = True
         if len(args) != 2:
@@ -1541,17 +2013,22 @@ def cmd_config(d, args):
                                    " (default %d)" % default))
 
 
-def cmd_forget(d, args):
+def cmd_resummarize(d, args):
     """A summary can be wrong -- mistyped, or a bad compression. Drop it and
     everything built on top of it; the next nap computes them again. The log
     is untouched, so nothing is ever actually lost."""
     if len(args) != 1:
-        die("usage: %s forget <lo>-<hi>" % ME)
+        die("usage: %s resummarize <lo>-<hi>" % ME)
     gone = tree_drop(d, *block_id(args[0]))
     if not gone:
         die("No summary at %s." % args[0])
-    print("Forgot %s, from %d-%d up. Run: %s nap"
+    print("Discarded %s, from %d-%d up. Run: %s nap"
           % (plural(len(gone), "summary"), gone[0][0], gone[0][1] - 1, ME))
+
+
+def cmd_forget(d, args):
+    """Compatibility alias for the former name of resummarize."""
+    cmd_resummarize(d, args)
 
 
 class QmdError(Exception):
@@ -1720,7 +2197,8 @@ def _qmd_context(d):
                 "preferences, and facts stored in this selected scope.")
     origin = git("remote", "get-url", "origin")
     if origin:
-        parts = re.split(r"[:/]", re.sub(r"\.git/*$", "", origin).rstrip("/"))
+        safe = canonical_origin(origin) or safe_origin_alias(origin)
+        parts = re.split(r"[:/]", re.sub(r"\.git/*$", "", safe).rstrip("/"))
         label = "/".join(parts[-2:])
         return ("Project OptMem memory for repository %s: architecture "
                 "decisions, commands, failed approaches, and "
@@ -2032,6 +2510,56 @@ whether semantic recall is enabled."""
     if warning:
         print("Could not remove the external QMD collection: %s" % warning)
     print("Raw OptMem memory was not changed.")
+
+
+def cmd_redact(d, args):
+    """The sole explicit exception to raw-log immutability."""
+    force = "--force" in args
+    values = [arg for arg in args if arg != "--force"]
+    if len(values) != 1 or len(args) != len(values) + (1 if force else 0):
+        die("usage: %s redact <id> --force" % ME)
+    ident = require_memory(d, values[0])
+    if not force:
+        die("This permanently removes the text of #%d from LOG.txt and "
+            "invalidates summaries derived from it.\n\nRun again with --force:\n"
+            "  %s redact %d --force" % (ident, ME, ident))
+
+    had_qmd = os.path.isdir(os.path.join(d, "QMD"))
+    enabled = qmd_enabled(d)
+    result = log_redact(d, ident)
+    if result is None:
+        die("No memory #%d." % ident)
+    if not result[3]:
+        print("#%d is already redacted." % ident)
+        return
+
+    total = log_len(d)
+    warnings = []
+    try:
+        gone = tree_invalidate_memory(d, ident) if total >= 2 else []
+    except OSError as e:
+        gone = []
+        warnings.append("summary invalidation: %s" % (e.strerror or e))
+    if had_qmd:
+        warning = _qmd_remove_collection(d)
+        if warning:
+            warnings.append("external QMD collection: " + warning)
+        try:
+            _qmd_reset_projection(d)
+            if enabled:
+                _qmd_index_projection(d, verify=True)
+        except (QmdError, OSError) as e:
+            warnings.append("QMD rebuild: " + str(e))
+
+    print("Redacted #%d. Its ID and date are preserved." % ident)
+    if gone:
+        print("Invalidated %s. Run: %s nap --batch 8"
+              % (plural(len(gone), "summary"), ME))
+    if warnings:
+        print("Warning: the raw log is redacted, but cleanup needs attention:")
+        for warning in warnings:
+            print("  - %s" % warning)
+        print("Do not use semantic recall until `%s qmd rebuild` succeeds." % ME)
 
 
 def fff_recall(d, query, limit=None):
@@ -2414,20 +2942,60 @@ def cmd_zoom(d, args):
     print("\n".join(lines))
 
 
-def cmd_import(d, args):
-    """Bulk-append historical memories: 'YYYY-MM-DD <text>' per line.
-    For bootstrapping an identity from older records. Used once."""
-    if len(args) != 1:
-        die("usage: %s import <file>   # lines of 'YYYY-MM-DD <text>'" % ME)
+def cmd_export(d, args):
+    with_ids = "--with-ids" in args
+    paths = [arg for arg in args if arg != "--with-ids"]
+    if len(paths) > 1 or len(args) != len(paths) + (1 if with_ids else 0):
+        die("usage: %s export [--with-ids] [file]" % ME)
+    if not paths:
+        for ident, date, text in log_scan(d):
+            prefix = "#%d " % ident if with_ids else ""
+            sys.stdout.write("%s%s %s\n" % (prefix, date, text))
+        return
+    target = os.path.abspath(os.path.expanduser(paths[0]))
+    if os.path.isdir(target):
+        die("Export destination is a directory: %s." % pretty(target))
+    if (os.path.normcase(os.path.realpath(target)) ==
+            os.path.normcase(os.path.realpath(log_path(d)))):
+        die("Refusing to export over the authoritative LOG.txt.")
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    existing = os.path.lexists(target)
+    mode = os.stat(target).st_mode if existing else None
+    fd, temporary = tempfile.mkstemp(prefix=".optmem-export-", suffix=".tmp",
+                                     dir=os.path.dirname(target))
+    written = 0
     try:
-        src = open(args[0], encoding="utf-8").readlines()
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as output:
+            for ident, date, text in log_scan(d):
+                prefix = "#%d " % ident if with_ids else ""
+                output.write("%s%s %s\n" % (prefix, date, text))
+                written += 1
+            output.flush()
+            os.fsync(output.fileno())
+        if mode is not None:
+            os.chmod(temporary, mode)
+        os.replace(temporary, target)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+    print("Exported %s to %s%s."
+          % (plural(written, "memory"), pretty(target),
+             " with inspection IDs" if with_ids else ""))
+
+
+def _parse_import(path):
+    try:
+        src = open(path, encoding="utf-8").read().splitlines()
     except UnicodeDecodeError:
         die("%s is not UTF-8 text. Convert it, then import again."
-            % pretty(args[0]))
-    last = log_get(d, log_len(d) - 1)[1] if log_len(d) else "0000-00-00"
-    out = []
+            % pretty(path))
+    last, out = "0000-00-00", []
+    amendments = retractions = invalid_refs = 0
+    longest = 0
     for i, line in enumerate(src, 1):
-        line = line.rstrip("\n")
         if not line.strip():
             continue
         date, _, text = line.partition(" ")
@@ -2442,17 +3010,72 @@ def cmd_import(d, args):
                 % (i, date, last))
         text = text.strip()
         if not text or len(text.encode()) > ENTRY_CHARS:
-            die("line %d: %d bytes, limit %d." % (i, len(text.encode()), ENTRY_CHARS))
+            die("line %d: %d bytes, limit %d."
+                % (i, len(text.encode()), ENTRY_CHARS))
+        lifecycle = _LIFECYCLE_REF.match(text)
+        if lifecycle:
+            target = int(lifecycle.group(2))
+            if lifecycle.group(1) == "Amends":
+                amendments += 1
+            else:
+                retractions += 1
+            if target >= len(out):
+                invalid_refs += 1
         out.append((date, text))
+        longest = max(longest, len(text.encode()))
         last = date
     if not out:
-        die("%s has no memories." % args[0])
-    base = log_append(d, out)
-    print("Imported %s, #%d to #%d."
-          % (plural(len(out), "memory"), base, base + len(out) - 1))
+        die("%s has no memories." % path)
+    return out, {
+        "first": out[0][0],
+        "last": out[-1][0],
+        "longest": longest,
+        "amendments": amendments,
+        "retractions": retractions,
+        "invalid_refs": invalid_refs,
+    }
+
+
+def cmd_import(d, args):
+    """Restore portable 'YYYY-MM-DD <text>' records into an empty store."""
+    dry = "--dry-run" in args
+    paths = [arg for arg in args if arg != "--dry-run"]
+    if len(paths) != 1 or len(args) != 1 + (1 if dry else 0):
+        die("usage: %s import [--dry-run] <file>" % ME)
+    out, stats = _parse_import(paths[0])
+    if stats["invalid_refs"]:
+        die("Invalid OptMem import: %d amendment/retraction %s forward or "
+            "outside the file."
+            % (stats["invalid_refs"],
+               "reference points" if stats["invalid_refs"] == 1
+               else "references point"))
+    existing = log_len(d) if os.path.isfile(log_path(d)) else 0
+    if existing:
+        die("Cannot import an OptMem history into a nonempty store.\n\n"
+            "This store already contains %s.\n"
+            "Import is for restoring or bootstrapping an empty store."
+            % plural(existing, "memory"))
+    if dry:
+        print("Valid OptMem import")
+        print("  Records:       %s" % format(len(out), ","))
+        print("  First date:    %s" % stats["first"])
+        print("  Last date:     %s" % stats["last"])
+        print("  Longest entry: %d of %d bytes"
+              % (stats["longest"], ENTRY_CHARS))
+        print("  Amendments:    %d" % stats["amendments"])
+        print("  Retractions:   %d" % stats["retractions"])
+        print("  Invalid refs:  0")
+        return
+    if not log_import_empty(d, out):
+        die("Cannot import an OptMem history into a nonempty store.\n\n"
+            "Another writer added a memory during import preflight. Retry with "
+            "an empty store.")
+    print("Imported %s, #0 to #%d."
+          % (plural(len(out), "memory"), len(out) - 1))
     n = pending_count(d, log_len(d))
     if n:
-        print("%s pending. Run: %s nap" % (plural(n, "compression"), ME))
+        print("%s pending. Run: %s nap --batch 8"
+              % (plural(n, "compression"), ME))
 
 
 def memory_status(d):
@@ -2468,10 +3091,160 @@ def memory_status(d):
     return plural(size // LOG_REC, "memory")
 
 
+def _scope_identity_status(d):
+    if SCOPE_GLOBAL or os.environ.get("MEMORY_DIR"):
+        return "not applicable", None
+    raw = git("remote", "get-url", "origin")
+    current = canonical_origin(raw)
+    stored = _read_scope_identity(d)
+    if not current:
+        return "checkout path (no canonical remote)", None
+    if not os.path.isdir(d):
+        return "not recorded (store not created)", None
+    if stored is None and os.path.lexists(_scope_identity_path(d)):
+        return "INVALID", "scope.json is malformed or unsafe"
+    if stored is None:
+        return "unrecorded legacy store", None
+    if stored["canonical"] != current:
+        warning = ("store belongs to %s, but this checkout is %s"
+                   % (stored["canonical"], current))
+        return "COLLISION", warning
+    return current, None
+
+
+def _verify_store(d):
+    errors, warnings = [], []
+    if not os.path.isdir(d):
+        return ["store does not exist: %s" % pretty(d)], warnings, 0, 0
+    path = log_path(d)
+    if not os.path.isfile(path):
+        return ["LOG.txt is missing"], warnings, 0, 0
+    raw_size = os.path.getsize(path)
+    if raw_size % LOG_REC:
+        errors.append("LOG.txt has %d trailing byte(s)"
+                      % (raw_size % LOG_REC))
+    total = raw_size // LOG_REC
+    previous_date = None
+    with open(path, "rb") as source:
+        for expected in range(total):
+            raw = source.read(LOG_REC)
+            if len(raw) != LOG_REC:
+                errors.append("LOG.txt record #%d is truncated" % expected)
+                break
+            if not raw.endswith(b"\n"):
+                errors.append("LOG.txt record #%d has no terminal newline"
+                              % expected)
+            try:
+                line = raw.decode("utf-8").rstrip()
+            except UnicodeDecodeError:
+                errors.append("LOG.txt record #%d is not UTF-8" % expected)
+                continue
+            if not line.startswith("#%d " % expected):
+                errors.append("LOG.txt record #%d has an invalid ID prefix"
+                              % expected)
+            try:
+                ident, date, text = parse(line)
+            except (ValueError, IndexError):
+                errors.append("LOG.txt record #%d does not parse" % expected)
+                continue
+            if ident != expected:
+                errors.append("LOG.txt position #%d identifies itself as #%d"
+                              % (expected, ident))
+            try:
+                datetime.date.fromisoformat(date)
+            except ValueError:
+                errors.append("memory #%d has invalid date %s"
+                              % (expected, date))
+            if previous_date is not None and date < previous_date:
+                errors.append("memory #%d date %s precedes %s"
+                              % (expected, date, previous_date))
+            previous_date = date
+            if not text:
+                errors.append("memory #%d has an empty payload" % expected)
+            lifecycle = _LIFECYCLE_REF.match(text)
+            if lifecycle and int(lifecycle.group(2)) >= expected:
+                errors.append("%s #%d points forward or to itself"
+                              % (lifecycle.group(1), expected))
+
+    tree = os.path.join(d, "TREE")
+    summaries = 0
+    if os.path.islink(tree):
+        errors.append("TREE directory is a symbolic link")
+    elif not os.path.isdir(tree):
+        errors.append("TREE directory is missing")
+    else:
+        for name in os.listdir(tree):
+            node = os.path.join(tree, name)
+            if not os.path.isfile(node) or os.path.islink(node):
+                errors.append("unexpected TREE entry: %s" % name)
+                continue
+            if not name.isdigit():
+                errors.append("unexpected TREE file: %s" % name)
+                continue
+            width = int(name)
+            if width < 2 or width & (width - 1):
+                errors.append("TREE/%s is not a power-of-two level" % name)
+                continue
+            length = os.path.getsize(node)
+            if length % TREE_REC:
+                errors.append("TREE/%s has %d trailing byte(s)"
+                              % (name, length % TREE_REC))
+            count_ = length // TREE_REC
+            summaries += count_
+            if count_ > total // width:
+                errors.append("TREE/%s contains %d impossible trailing node(s)"
+                              % (name, count_ - total // width))
+            with open(node, "rb") as source:
+                for index in range(count_):
+                    record = source.read(TREE_REC)
+                    try:
+                        summary = record.decode("utf-8").rstrip()
+                    except UnicodeDecodeError:
+                        errors.append("TREE/%s node %d is not UTF-8"
+                                      % (name, index))
+                        continue
+                    if not record.endswith(b"\n"):
+                        errors.append("TREE/%s node %d has no terminal newline"
+                                      % (name, index))
+                    if not summary:
+                        errors.append("TREE/%s has a blank node inside its "
+                                      "dense prefix at index %d" % (name, index))
+            if width > 2 and count_:
+                child = tree_path(d, width // 2)
+                child_count = count(child, TREE_REC)
+                needed = count_ * 2
+                if child_count < needed:
+                    errors.append("TREE/%s has nodes without both TREE/%d "
+                                  "children (%d needed, %d present)"
+                                  % (name, width // 2, needed, child_count))
+
+    if qmd_enabled(d):
+        try:
+            state = _qmd_state(d)
+            expected_segments = ((total + QMD_SEGMENT_SIZE - 1) //
+                                 QMD_SEGMENT_SIZE)
+            actual_segments = len(_qmd_projection_files(d))
+            if state is None:
+                warnings.append("QMD projection state is missing or invalid; "
+                                "run: %s qmd sync" % ME)
+            elif state["logRecords"] != total:
+                warnings.append("QMD projection is stale (%d log records, %d "
+                                "projected); run: %s qmd sync"
+                                % (total, state["logRecords"], ME))
+            elif actual_segments != expected_segments:
+                warnings.append("QMD projection has %d segment(s), expected "
+                                "%d; run: %s qmd sync"
+                                % (actual_segments, expected_segments, ME))
+        except QmdError as e:
+            errors.append("QMD projection is unsafe: %s" % e)
+    return errors, warnings, total, summaries
+
+
 def cmd_doctor(d, args):
     """Explain what this invocation will use without creating or changing it."""
-    if args:
-        die("usage: %s doctor" % ME)
+    deep = args == ["--deep"]
+    if args and not deep:
+        die("usage: %s doctor [--deep]" % ME)
     project = scope_dir()
     global_ = os.path.expanduser(GLOBAL)
     override = os.environ.get("MEMORY_DIR")
@@ -2492,7 +3265,9 @@ def cmd_doctor(d, args):
         else:
             fff_status = "not installed (optional: python -m pip install fff-search)"
 
-    origin = git("remote", "get-url", "origin") or "none; using checkout path"
+    origin_raw = git("remote", "get-url", "origin")
+    origin = (safe_origin_alias(origin_raw) if origin_raw else
+              "none; using checkout path")
     on_path = bool(shutil.which("memo") or shutil.which("memo.cmd"))
     print("OptMem doctor")
     print("  Tool:          %s" % pretty(__file__))
@@ -2514,6 +3289,28 @@ def cmd_doctor(d, args):
     print("  QMD projection:  %s" % qmd["projection"])
     print("  QMD collection:  %s" % qmd["collection"])
     print("  QMD embeddings:  %s" % qmd["embeddings"])
+    identity, collision = _scope_identity_status(d)
+    print("  Scope identity: %s" % identity)
+    if collision:
+        print("  WARNING:        %s" % collision)
+        print("                  These repositories share the legacy owner/repo path.")
+    if deep:
+        errors, warnings, records_, summaries = _verify_store(d)
+        print()
+        print("Deep verification")
+        print("  Raw records:    %d" % records_)
+        print("  Tree summaries: %d" % summaries)
+        for warning in warnings:
+            print("  Warning:        %s" % warning)
+        if errors:
+            print("  Result:         FAILED (%s)"
+                  % plural(len(errors), "problem"))
+            for problem in errors:
+                print("    - %s" % problem)
+            sys.exit(1)
+        print("  Result:         OK%s"
+              % (" with %s" % plural(len(warnings), "warning")
+                 if warnings else ""))
     if memory_status(global_) == "not created":
         print()
         print("Next: create global memory with: %s init" % TOOL)
@@ -2526,9 +3323,11 @@ def cmd_doctor(d, args):
 COMMANDS = {"init": cmd_init, "setup": cmd_setup,
             "completion": cmd_completion, "upgrade": cmd_upgrade,
             "uninstall": cmd_uninstall, "qmd": cmd_qmd, "wake": cmd_wake,
-            "note": cmd_note,
+            "note": cmd_note, "show": cmd_show, "amend": cmd_amend,
+            "retract": cmd_retract, "redact": cmd_redact,
             "nap": cmd_nap, "recall": cmd_recall, "zoom": cmd_zoom,
-            "forget": cmd_forget, "config": cmd_config, "import": cmd_import,
+            "resummarize": cmd_resummarize, "forget": cmd_forget,
+            "config": cmd_config, "export": cmd_export, "import": cmd_import,
             "doctor": cmd_doctor}
 
 
@@ -2598,6 +3397,15 @@ def main():
             return
         if cmd == "doctor":
             cmd_doctor(memory_dir(), argv[1:])
+            return
+        if cmd == "import" and "--dry-run" in argv[1:]:
+            d = memory_dir()
+            if os.path.isdir(d):
+                config(d)
+            else:
+                for key, (default, _) in KNOBS.items():
+                    globals()[key] = default
+            cmd_import(d, argv[1:])
             return
         d = store()
         config(d)

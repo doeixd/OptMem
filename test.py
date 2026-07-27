@@ -160,6 +160,19 @@ ghost = subprocess.run(memo + ["wake"], capture_output=True, text=True,
 check(ghost.returncode == 1 and "No memory at" in ghost.stderr,
       "a missing MEMORY_DIR was created instead of reported")
 check(not os.path.exists(d + "-typo"), "a missing MEMORY_DIR was created")
+dry_source = d + "-dry-source.txt"
+with open(dry_source, "w", encoding="utf-8") as f:
+    f.write("2026-07-27 one portable record\n")
+dry_missing = d + "-dry-store"
+dry_cli = subprocess.run(
+    memo + ["import", "--dry-run", dry_source],
+    capture_output=True, text=True,
+    env=dict(os.environ, MEMORY_DIR=dry_missing))
+check(dry_cli.returncode == 0 and "Valid OptMem import" in dry_cli.stdout
+      and not os.path.exists(dry_missing),
+      "import --dry-run created a missing explicit store:\n"
+      + dry_cli.stdout + dry_cli.stderr)
+os.unlink(dry_source)
 
 # the fresh-user path: no MEMORY_DIR, wake creates a project memory and says
 # the global one is missing; init creates that one and remains idempotent
@@ -174,7 +187,9 @@ check(helped.returncode == 0 and "Usage:" in helped.stdout
       and "completion <shell>" in helped.stdout
       and "upgrade" in helped.stdout and "uninstall" in helped.stdout
       and "doctor" in helped.stdout and "qmd [help]" in helped.stdout
-      and "recall [options]" in helped.stdout,
+      and "recall [options]" in helped.stdout and "amend <id>" in helped.stdout
+      and "resummarize" in helped.stdout and "export [--with-ids]" in
+          helped.stdout,
       "--help is not a useful command overview:\n" + helped.stdout + helped.stderr)
 help_alias = subprocess.run(memo + ["help"], capture_output=True, text=True,
                             env=fresh)
@@ -198,7 +213,9 @@ for shell, signature in completion_signatures.items():
           and "depth" in completed.stdout and "semantic" in completed.stdout
           and "fast" in completed.stdout and "qmd" in completed.stdout
           and "sync" in completed.stdout and "FALLBACK=on" in completed.stdout
-          and "purge" in completed.stdout,
+          and "purge" in completed.stdout and "resummarize" in completed.stdout
+          and "with-ids" in completed.stdout and "dry-run" in completed.stdout
+          and "batch" in completed.stdout and "deep" in completed.stdout,
           "%s completion omits recall/zoom controls" % shell)
 bad_completion = subprocess.run(memo + ["completion", "tcsh"],
                                 capture_output=True, text=True, env=fresh)
@@ -489,6 +506,10 @@ check("append-only log" in init.stdout
       and "raw memories remain searchable" in init.stdout
       and "max 280 UTF-8 bytes" in init.stdout
       and "recall --semantic" in init.stdout
+      and "amend <id>" in init.stdout and "retract <id>" in init.stdout
+      and "Later amendments, corrections, and retractions override" in
+          init.stdout
+      and "may reference earlier `#IDs`" in init.stdout
       and "Never record secrets, credentials" in init.stdout,
       "agent instructions do not explain the memory/compression model")
 check("BEGIN OPTMEM AGENT INSTRUCTIONS" in init.stdout
@@ -753,6 +774,174 @@ r = run("recall", "--fuzzy", "anything")
 check(r.returncode == 1 and "pip install fff-search" in r.stderr,
       "forced FFF recall did not explain how to enable it: " + r.stderr)
 cli.fff_recall = real_fff_recall
+
+
+# Lifecycle records are later events over stable IDs, not mutations of prior
+# facts. Export/import preserves those IDs by restoring only into an empty log.
+life = tempfile.mkdtemp(prefix="optmem-lifecycle-")
+os.makedirs(os.path.join(life, "TREE"))
+open(os.path.join(life, "LOG.txt"), "wb").close()
+original = run("note", "Mutation requests may be retried.", store=life)
+check("Saved as #0" in original.stdout, "lifecycle seed note failed")
+amended = run("amend", "#0", "Only idempotent reads are retried.", store=life)
+retracted = run("retract", "0", "Obsolete after the client rewrite.", store=life)
+run("note", "The migration rationale is anchored by #0 and #1.", store=life)
+check(amended.returncode == 0 and "Amended #0 with #1" in amended.stdout,
+      "amend did not append a stable lifecycle event: "
+      + amended.stdout + amended.stderr)
+check(retracted.returncode == 0 and "Retracted #0 with #2" in retracted.stdout,
+      "retract did not append a stable lifecycle event")
+shown = run("show", "0", store=life)
+check("Mutation requests may be retried." in shown.stdout
+      and "Later references:" in shown.stdout
+      and "Amends #0:" in shown.stdout and "Retracts #0:" in shown.stdout
+      and "anchored by #0" in shown.stdout,
+      "show did not resolve the canonical record and later references:\n"
+      + shown.stdout + shown.stderr)
+before_invalid = os.path.getsize(os.path.join(life, "LOG.txt"))
+invalid_amend = run("amend", "99", "Impossible target.", store=life)
+check(invalid_amend.returncode == 1
+      and os.path.getsize(os.path.join(life, "LOG.txt")) == before_invalid,
+      "amend accepted a missing ID or changed the log")
+check(run("amend", "0", "   ", store=life).returncode == 1
+      and run("retract", "0", "   ", store=life).returncode == 1,
+      "lifecycle commands accepted an empty replacement/reason")
+
+portable = os.path.join(life, "portable.txt")
+inspection = os.path.join(life, "inspection.txt")
+check(run("export", portable, store=life).returncode == 0
+      and open(portable, encoding="utf-8").read().startswith(
+          datetime.date.today().isoformat() + " Mutation"),
+      "default export is not portable")
+check(run("export", "--with-ids", inspection, store=life).returncode == 0
+      and open(inspection, encoding="utf-8").read().startswith("#0 "),
+      "inspection export omitted IDs")
+check(run("export", os.path.join(life, "LOG.txt"), store=life).returncode == 1,
+      "export was allowed to overwrite authoritative LOG.txt")
+
+restored = tempfile.mkdtemp(prefix="optmem-restored-")
+os.makedirs(os.path.join(restored, "TREE"))
+open(os.path.join(restored, "LOG.txt"), "wb").close()
+dry = run("import", "--dry-run", portable, store=restored)
+check(dry.returncode == 0 and "Valid OptMem import" in dry.stdout
+      and "Amendments:    1" in dry.stdout
+      and "Retractions:   1" in dry.stdout and cli.log_len(restored) == 0,
+      "import --dry-run wrote data or omitted lifecycle diagnostics:\n"
+      + dry.stdout + dry.stderr)
+loaded = run("import", portable, store=restored)
+check(loaded.returncode == 0 and cli.log_len(restored) == 4
+      and cli.log_get(restored, 1)[2].startswith("Amends #0:"),
+      "portable import did not preserve ordered IDs")
+loaded_bytes = open(os.path.join(restored, "LOG.txt"), "rb").read()
+second_import = run("import", portable, store=restored)
+check(second_import.returncode == 1 and "nonempty store" in second_import.stderr
+      and open(os.path.join(restored, "LOG.txt"), "rb").read() == loaded_bytes,
+      "bootstrap-only import appended into a nonempty store")
+
+bad_import = os.path.join(life, "bad-reference.txt")
+with open(bad_import, "w", encoding="utf-8") as f:
+    f.write("2026-07-27 Amends #1: points forward\n")
+bad_store = tempfile.mkdtemp(prefix="optmem-bad-import-")
+os.makedirs(os.path.join(bad_store, "TREE"))
+open(os.path.join(bad_store, "LOG.txt"), "wb").close()
+bad_dry = run("import", "--dry-run", bad_import, store=bad_store)
+check(bad_dry.returncode == 1 and "Invalid OptMem import" in bad_dry.stderr
+      and cli.log_len(bad_store) == 0,
+      "import accepted a forward lifecycle reference")
+cli.log_append(bad_store, [("2026-07-27", "Amends #9: invalid raw ref")])
+bad_errors, _, _, _ = cli._verify_store(bad_store)
+check(any("forward or to itself" in problem for problem in bad_errors),
+      "deep verification missed an invalid lifecycle reference")
+
+# A batch contains one dense run at the smallest pending level. Applying is
+# all-or-nothing and one fsync, so large imports need far fewer agent turns.
+batch = run("nap", "--batch", "3", store=restored)
+check(batch.returncode == 0
+      and all(("%d-%d:" % pair) in batch.stdout
+              for pair in ((0, 1), (2, 3)))
+      and "<range><TAB><one-line summary>" in batch.stdout,
+      "nap --batch did not print independent ready jobs:\n" + batch.stdout)
+stale_file = os.path.join(restored, "stale.tsv")
+with open(stale_file, "w", encoding="utf-8") as f:
+    f.write("2-3\tsecond before first\n")
+stale = run("nap", "--apply", stale_file, store=restored)
+check(stale.returncode == 1
+      and cli.count(cli.tree_path(restored, 2), cli.TREE_REC) == 0,
+      "a stale batch partially changed the tree")
+batch_file = os.path.join(restored, "summaries.tsv")
+with open(batch_file, "w", encoding="utf-8") as f:
+    f.write("0-1\tFinal retry policy allows only idempotent reads.\n")
+    f.write("2-3\tThe old policy was retracted; #0 and #1 anchor rationale.\n")
+applied = run("nap", "--apply", batch_file, store=restored)
+check(applied.returncode == 0
+      and cli.count(cli.tree_path(restored, 2), cli.TREE_REC) == 2,
+      "nap --apply did not atomically save the batch")
+errors, warnings, records_, summaries = cli._verify_store(restored)
+check(not errors and records_ == 4 and summaries == 2,
+      "deep verification rejected a healthy lifecycle store: %r" % errors)
+deep = run("doctor", "--deep", store=restored)
+check(deep.returncode == 0 and "Deep verification" in deep.stdout
+      and "Result:         OK" in deep.stdout,
+      "doctor --deep did not report a healthy store:\n"
+      + deep.stdout + deep.stderr)
+
+# Redaction is the only raw rewrite: it preserves width, ID, and date, removes
+# the payload, and invalidates every summary that could retain the text.
+before_redact = os.path.getsize(os.path.join(restored, "LOG.txt"))
+confirm = run("redact", "0", store=restored)
+check(confirm.returncode == 1 and "Run again with --force" in confirm.stderr,
+      "redact did not require explicit force")
+redacted = run("redact", "0", "--force", store=restored)
+log_after_redact = open(os.path.join(restored, "LOG.txt"), "rb").read()
+check(redacted.returncode == 0 and cli.log_get(restored, 0)[2] ==
+      "[REDACTED BY USER]"
+      and os.path.getsize(os.path.join(restored, "LOG.txt")) == before_redact
+      and b"Mutation requests may be retried." not in log_after_redact
+      and cli.count(cli.tree_path(restored, 2), cli.TREE_REC) == 0,
+      "redact did not erase in place and invalidate derived summaries:\n"
+      + redacted.stdout + redacted.stderr)
+errors, _, _, _ = cli._verify_store(restored)
+check(not errors, "deep verification rejected a redacted store: %r" % errors)
+
+qmd_redact = tempfile.mkdtemp(prefix="optmem-redact-qmd-")
+os.makedirs(os.path.join(qmd_redact, "TREE"))
+open(os.path.join(qmd_redact, "LOG.txt"), "wb").close()
+cli.log_append(qmd_redact, [
+    ("2026-07-27", "secret payload copied into QMD"),
+    ("2026-07-27", "ordinary second record"),
+])
+cli._qmd_mark(qmd_redact, "enabled")
+cli._qmd_sync_projection(qmd_redact)
+qmd_redact_calls = []
+real_remove_collection = cli._qmd_remove_collection
+real_index_projection = cli._qmd_index_projection
+cli._qmd_remove_collection = lambda store: (
+    qmd_redact_calls.append("remove") or None)
+
+
+def rebuild_redacted_projection(store, verify=False):
+    qmd_redact_calls.append("rebuild")
+    cli._qmd_sync_projection(store)
+    return cli.log_len(store), 1
+
+
+cli._qmd_index_projection = rebuild_redacted_projection
+qmd_redacted = run("redact", "0", "--force", store=qmd_redact)
+cli._qmd_remove_collection = real_remove_collection
+cli._qmd_index_projection = real_index_projection
+qmd_segment = open(os.path.join(
+    qmd_redact, "QMD", "00000000-00000015.md"), encoding="utf-8").read()
+check(qmd_redacted.returncode == 0
+      and qmd_redact_calls == ["remove", "rebuild"]
+      and "secret payload" not in qmd_segment
+      and "[REDACTED BY USER]" in qmd_segment,
+      "redaction left sensitive text in an enabled QMD projection:\n"
+      + qmd_redacted.stdout + qmd_redacted.stderr)
+
+shutil.rmtree(life)
+shutil.rmtree(restored)
+shutil.rmtree(bad_store)
+shutil.rmtree(qmd_redact)
 
 
 # QMD is an explicitly enabled, disposable semantic index. Projection files
@@ -1303,7 +1492,7 @@ with open(os.path.join(d3, "config"), "w") as f:
 with open(os.path.join(d3, "TREE", "2"), "r+b") as f:
     f.write(b" " * 287 + b"\n")
 r = run("wake", store=d3)
-check(r.returncode == 1 and "forget 0-1" in r.stderr
+check(r.returncode == 1 and "resummarize 0-1" in r.stderr
       and "None" not in r.stdout,
       "a blank summary must point at forget:\n" + r.stdout + r.stderr)
 
@@ -1340,7 +1529,7 @@ while True:
 with open(os.path.join(d4, "TREE", "16"), "r+b") as f:
     f.write(b" " * 287 + b"\n")
 r = run("nap", store=d4)
-check(r.returncode == 1 and "forget 0-15" in r.stderr,
+check(r.returncode == 1 and "resummarize 0-15" in r.stderr,
       "a blank half summary must point at forget: " + r.stdout + r.stderr)
 shutil.rmtree(d4)
 
@@ -1370,7 +1559,7 @@ run("nap", "0-1", "both utf8 probes", store=d5)
 with open(os.path.join(d5, "TREE", "2"), "r+b") as f:
     f.write(b"\xff\xfe corrupt bytes")
 r = run("zoom", "0-3", store=d5)
-check(r.returncode == 1 and "forget 0-1" in r.stderr,
+check(r.returncode == 1 and "resummarize 0-1" in r.stderr,
       "a corrupt summary must point at forget: " + r.stdout + r.stderr)
 shutil.rmtree(d5)
 
@@ -1442,6 +1631,19 @@ check(as_repo("https://github.com/Texarkanine/OptMem") == ssh,
       "one repo split across two remote spellings")
 check(as_repo("git@github.com:Texarkanine/OptMem.git/") == ssh,
       "a trailing slash forked the memory of one repo")
+check(as_repo("https://token@github.com/Texarkanine/OptMem.git?secret=yes")
+      == ssh, "a credentialed remote leaked into or split project scope")
+check(cli.canonical_origin("git@github.com:acme/api.git") ==
+      "github.com/acme/api"
+      and cli.canonical_origin("https://github.com/acme/api.git") ==
+      "github.com/acme/api"
+      and cli.canonical_origin("https://gitlab.com/acme/api.git") ==
+      "gitlab.com/acme/api",
+      "host-aware origin canonicalization is unstable")
+check(cli.safe_origin_alias(
+          "https://secret-token@github.com/acme/api.git?credential=hidden") ==
+      "https://github.com/acme/api.git",
+      "scope identity alias retained URL credentials")
 fallback = as_repo(None, os.path.abspath(os.sep + os.path.join("work", "repo")))
 check(fallback.startswith(os.path.join(xdg, "optmem", "path")),
       "no remote did not fall back to a portable path: " + fallback)
@@ -1472,10 +1674,25 @@ check(e2e.returncode == 0 and "Saved as #0." in e2e.stdout,
       + e2e.stdout + e2e.stderr)
 log = os.path.join(xdg, "optmem", "repo", "acme", "widget", "LOG.txt")
 check(os.path.exists(log), "the project memory was not created at " + log)
+scope_file = os.path.join(os.path.dirname(log), "scope.json")
+with open(scope_file, encoding="utf-8") as f:
+    scope_identity = json.load(f)
+check(scope_identity["canonical"] == "github.com/acme/widget"
+      and "git@github.com:acme/widget.git" in scope_identity["aliases"],
+      "project store did not record its host-aware identity")
 r = subprocess.run(memo + ["recall", "scoped"], cwd=repo, capture_output=True,
                    text=True, env=dict(os.environ, XDG_DATA_HOME=xdg))
 check("1 match" in r.stdout or "scoped memories" in r.stdout,
       "recall did not read the project memory: " + r.stdout + r.stderr)
+subprocess.run(["git", "-C", repo, "remote", "set-url", "origin",
+                "https://gitlab.com/acme/widget.git"], check=True)
+collision = subprocess.run(memo + ["doctor"], cwd=repo, capture_output=True,
+                           text=True, env=dict(os.environ, XDG_DATA_HOME=xdg))
+check(collision.returncode == 0 and "Scope identity: COLLISION" in
+      collision.stdout and "github.com/acme/widget" in collision.stdout
+      and "gitlab.com/acme/widget" in collision.stdout,
+      "doctor did not warn about a host collision:\n"
+      + collision.stdout + collision.stderr)
 
 shutil.rmtree(repo)
 shutil.rmtree(fake_release)

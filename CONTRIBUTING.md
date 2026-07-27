@@ -44,8 +44,13 @@ py -3 test.py
 
 Please preserve these unless a change explicitly redesigns them:
 
-- `LOG.txt` is append-only and is the source of truth.
+- `LOG.txt` is the source of truth. Records are append-only except for the
+  explicit, user-confirmed redaction escape hatch, which preserves ID/date.
 - Records remain fixed width; position is memory identity.
+- Amendments and retractions are later raw records with backward stable-ID
+  references; they never mutate the record they supersede.
+- Portable import is empty-store only and must preflight every record and
+  lifecycle reference before writing. Batch-summary apply is also all-or-none.
 - `TREE/` is a rebuildable cache, never the only copy of information.
 - Core commands require only the Python standard library.
 - FFF is optional because its Python bindings require Python 3.10+.
@@ -68,6 +73,8 @@ Please preserve these unless a change explicitly redesigns them:
 - `zoom --depth` must preserve left-to-right tree order and remain within the
   shared output limits.
 - Concurrent writers must receive unique IDs without losing records.
+- Project stores retain a host-aware origin claim; a colliding legacy
+  `owner/repo` scope must warn without rewriting that identity.
 - Re-running `memo init` or either installer must preserve memory data and
   user configuration.
 - Installers must add the canonical `memo` command to user PATH idempotently

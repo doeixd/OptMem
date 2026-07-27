@@ -116,12 +116,28 @@ Do not record:
 - raw command output that can be reproduced cheaply;
 - a fact already represented by an existing memory.
 
-Memories are one line and at most 280 bytes. A good note is specific and
+Memories are one line and at most 280 UTF-8 bytes. A good note is specific and
 self-contained:
 
 ```sh
 memo note "The API client retries 429 responses with capped exponential backoff."
 ```
+
+Every raw memory has a stable `#ID`. An agent may cite an earlier `#ID` in a
+later note when that makes a durable fact, decision, or reason precise. When a
+claim changes, preserve the chronology instead of silently contradicting it:
+
+```sh
+memo show 42
+memo amend 42 "Only idempotent reads are retried."
+memo retract 42 "Obsolete after the HTTP client rewrite."
+```
+
+`amend` appends a corrected replacement. `retract` appends that the earlier
+memory is no longer authoritative. Both keep the original as useful history,
+and later lifecycle records override it during compression. `redact` is not an
+agent correction tool: it physically erases a payload and should only be run
+when the user explicitly requests removal of sensitive text.
 
 ## Project or global?
 
@@ -188,6 +204,28 @@ memo zoom --depth 3 128-255
 
 Depth defaults to one and is capped at six. Repeat `zoom` on the relevant node
 until the raw memories appear.
+
+## Compression and large restores
+
+Compression is a lossy retrieval cue; it never replaces the authoritative raw
+records. Later amendments, corrections, and retractions override the records
+they reference. Preserve the final outcome and keep an earlier account only
+when its history or failure reason remains useful.
+
+For a large import or summary rebuild, reduce agent/tool round trips:
+
+```sh
+memo nap --batch 8
+```
+
+Summarize each printed range independently, write the requested
+`<range><TAB><summary>` lines to a UTF-8 file, then run:
+
+```sh
+memo nap --apply summaries.txt
+```
+
+OptMem validates the entire file before atomically adding any summaries.
 
 ## Parallel agents and subagents
 

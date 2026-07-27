@@ -3,7 +3,7 @@
 Permanent, local memory for AI coding agents.
 
 OptMem gives an agent continuity across sessions, compaction, models, and
-vendors. Memories are append-only plain text on your machine: one focused
+vendors. Memories are local plain text records, immutable by default: one focused
 store per project, plus one small global store for facts that follow you
 everywhere. There is no account, server, background daemon, or required Python
 package.
@@ -112,9 +112,11 @@ automatic:
    followed by this project's context.
 2. During work, it records durable decisions and discoveries with
    `memo note "..."`.
-3. If a note requests a compression, the agent completes that `memo nap`
+3. When an earlier memory changes, it uses `memo amend` or `memo retract`
+   instead of silently contradicting history.
+4. If a note requests a compression, the agent completes that `memo nap`
    before continuing.
-4. When older information is needed, the agent uses exact or fuzzy `recall`,
+5. When older information is needed, the agent uses exact or fuzzy `recall`,
    optional semantic recall, then `zoom` to inspect a summary in more detail.
 
 Good project memory:
@@ -141,11 +143,16 @@ walkthrough, and guidance for subagents.
 | Global | `memo --global note "..."` | User preferences, machine/tooling facts, durable information true across unrelated repositories |
 | Explicit override | Set `MEMORY_DIR` | Advanced use: pin every command to one chosen store and bypass project/global scoping |
 
-Each store has an append-only raw log and a rebuildable binary tree of lossy
+Each store has an append-first raw log and a rebuildable binary tree of lossy
 summaries. `wake` reads a bounded frontier with coarser summaries for older
 history and finer detail toward the present; `recall` searches the full raw
 log, while `zoom` opens a summary toward the entries beneath it. Compression
 makes startup context smaller—it never deletes the raw memories.
+
+Raw memories have stable `#IDs`, and later memories may cite those IDs to
+anchor durable facts or decisions. Corrections are later events: `amend`
+appends a replacement and `retract` appends that an older claim is no longer
+authoritative. Only explicit user-directed redaction rewrites a payload.
 
 When explicitly enabled for a scope, QMD gets a disposable Markdown
 projection of the same raw log in fixed 16-memory segments. QMD chooses
@@ -158,9 +165,11 @@ project memory second. Other commands target only one scope. Put `--global`
 before the command—not after it.
 
 Projects are keyed by the Git `origin` reduced to `owner/repo`, so worktrees
-and differently named checkouts share memory. Without an origin, OptMem falls
-back to the repository root; outside Git, it falls back to the current
-directory. Run `memo doctor` whenever the selected scope is surprising.
+and differently named checkouts share memory. OptMem also records the
+host-aware origin identity and `doctor` warns if, for example,
+`github.com/acme/api` and `gitlab.com/acme/api` collide at that legacy path.
+Without an origin, OptMem falls back to the repository root; outside Git, it
+falls back to the current directory.
 
 ## Commands
 
@@ -171,7 +180,7 @@ directory. Run `memo doctor` whenever the selected scope is surprising.
 | `memo completion <shell>` | print completion for Bash, Zsh, Fish, or PowerShell |
 | `memo upgrade` | download the latest release, validate it, and refresh PATH/completion setup |
 | `memo uninstall` | remove the command and shell integration while preserving every memory |
-| `memo doctor` | explain the active scope, store paths, Python, PATH, Git origin, FFF, and QMD |
+| `memo doctor [--deep]` | explain setup and scope; optionally verify the raw log, tree, lifecycle references, and QMD projection state |
 | `memo qmd enable` | explicitly enable optional QMD semantic recall for this scope |
 | `memo qmd help` | explain the integration’s commands, isolation, and lazy behavior |
 | `memo qmd status` | inspect the QMD executable, projection, collection, and embeddings |
@@ -181,20 +190,65 @@ directory. Run `memo doctor` whenever the selected scope is surprising.
 | `memo qmd disable [--purge]` | disable QMD; optionally remove its projection |
 | `memo wake` | read both memories — global, then project; first command of every session |
 | `memo note "..."` | record one memory: one line, up to 280 UTF-8 bytes (project by default) |
+| `memo show <id>` | show one canonical raw memory and later records that reference its stable ID |
+| `memo amend <id> "..."` | append a corrected replacement; preserve the original as history |
+| `memo retract <id> "<reason>"` | append that an earlier memory is no longer authoritative |
 | `memo nap` | answer the merges that came due |
+| `memo nap --batch N` | print up to N independent compression jobs |
+| `memo nap --apply <file>` | preflight and atomically apply TAB-separated batch summaries |
 | `memo recall [--limit N] [--context N] <regex>` | search the complete raw log while controlling matches and neighboring entries |
 | `memo recall --fuzzy [--limit N] [--context N] "<text>"` | typo-tolerant raw-memory search with optional FFF |
 | `memo recall --semantic "<meaning>"` | meaning-based raw-memory recall with explicitly enabled QMD |
 | `memo recall --semantic --fast "<meaning>"` | semantic recall without QMD reranking, useful for repeated related searches |
 | `memo zoom [--depth N] <lo>-<hi>` | open one to six levels of a summary-tree node |
-| `memo forget <lo>-<hi>` | drop a bad summary; the next nap rebuilds it |
+| `memo resummarize <lo>-<hi>` | drop a bad summary; the next nap rebuilds it (`forget` remains an alias) |
+| `memo redact <id> --force` | permanently erase one sensitive payload, preserve its ID, and invalidate derived caches |
 | `memo config [NAME=N]` | inspect or change the active store's reading/output limits |
-| `memo import <file>` | bootstrap an empty store from `YYYY-MM-DD <text>` lines |
+| `memo export [--with-ids] [file]` | write a portable history; IDs are omitted by default so the output can be imported |
+| `memo import [--dry-run] <file>` | validate or restore `YYYY-MM-DD <text>` records into an empty store |
 | `memo --help` | show the complete command overview |
 
 Put `--global` before any command to reach the memory that follows you into
 every project. Merges arrive one at a time, in the output of `note`. Nothing
 ever runs in the background.
+
+## Memory lifecycle
+
+```sh
+memo note "Mutation requests may be retried automatically."
+memo show 42
+memo amend 42 "Mutation requests are not retried; only idempotent reads are."
+memo retract 42 "Obsolete after the HTTP client rewrite."
+```
+
+`amend` and `retract` are ordinary later memories:
+
+```text
+#81 2026-07-27 Amends #42: Mutation requests are not retried; only idempotent reads are.
+#82 2026-07-27 Retracts #42: Obsolete after the HTTP client rewrite.
+```
+
+The original remains visible as history, but compression treats later
+amendments, corrections, and retractions as authoritative. Agents may also
+reference earlier `#IDs` in ordinary notes when a stable fact, decision, or
+causal link benefits from an exact anchor.
+
+`redact` is intentionally different and requires `--force`: it replaces the
+payload with `[REDACTED BY USER]`, preserves the ID and date, invalidates
+summaries, and rebuilds or invalidates optional QMD data. Use it only when text
+must actually be erased—not for routine corrections.
+
+Portable backups use the same format as import:
+
+```sh
+memo export memories.txt
+memo import --dry-run memories.txt
+memo import memories.txt       # destination must be empty
+```
+
+Default export omits IDs. Importing the records in order into an empty store
+recreates the same IDs, so amendment and retraction references remain valid.
+`--with-ids` is an inspection format and is not importable.
 
 ### Recall controls and tree depth
 
@@ -327,10 +381,11 @@ true tomorrow in a repository you have never seen.
   memo              the tool: one file of Python 3, no required dependencies
   memo.cmd          Windows launcher
   memory/           the global memory (create with `memo init`)
-    LOG.txt         every memory, one per line, append-only, never edited
+    LOG.txt         authoritative fixed-width records; append-only except redact
     TREE/           the summaries: a cache, rebuildable from the log alone
     QMD/            optional 16-memory Markdown projection, fully disposable
     config          the sizes, written by `memo config`
+    scope.json      project stores only: host identity and origin aliases
 
 $XDG_DATA_HOME/optmem/   (default: ~/.local/share/optmem)
   repo/<owner>/<repo>/   one memory per project, same layout as memory/
@@ -353,7 +408,8 @@ Set `$MEMORY_DIR` to pin a single store and skip scoping — a synced folder, a
 git repo. See [WINDOWS.md](WINDOWS.md) for native PowerShell usage and locking
 details.
 
-`LOG.txt` is the source of truth. `TREE/` is a rebuildable summary cache.
+`LOG.txt` is the source of truth. Raw records are immutable unless the user
+explicitly invokes `redact --force`. `TREE/` is a rebuildable summary cache.
 Backing up the memory directories is sufficient; never hand-edit them while an
 agent may be writing.
 
@@ -429,7 +485,11 @@ Without it you do not know who you are, or what was decided and tried.
 ### Mental model
 
 Each scope is an append-only log. `note` adds one raw memory with a stable
-`#ID`; raw memories remain the source of truth and are never rewritten.
+`#ID`; raw memories remain the source of truth. Later memories may cite earlier
+`#IDs` when that makes a durable fact or decision unambiguous. `amend` appends a
+corrected replacement; `retract` appends that an earlier memory is no longer
+authoritative. The earlier record remains useful history. Only explicit,
+user-directed `redact --force` rewrites a raw payload, to erase sensitive text.
 Adjacent memories are also represented by a binary tree of lossy one-line
 summaries. `wake` shows a bounded frontier from that tree—not full history—
 with coarser summaries for older history and finer detail toward the present.
@@ -458,6 +518,14 @@ lesson -- write it to that project.
 Do not register redundant memories. Never record secrets, credentials,
 authentication material, or raw sensitive data.
 
+If a durable memory changes, do not contradict it with an unexplained note.
+Use `memo amend <id> "<replacement>"`; use
+`memo retract <id> "<reason>"` when it has no replacement. Ordinary memories
+may reference earlier `#IDs` to anchor stable facts and reasoning. Use
+`memo show <id>` when you need the exact record and its later references.
+Redaction is not correction: only the user may request it, and it exists for
+content that must actually be erased.
+
 If `memo note` asks a compression, follow its prompt and run the exact
 `nap` command before your next action.
 A compression is a lossy retrieval cue for the supplied range, not a
@@ -465,7 +533,9 @@ deletion: the raw memories remain searchable. Write one self-contained line.
 Preserve durable decisions, outcomes, constraints, causal links, preferences,
 and useful failure reasons. Drop transient status, incidental chronology, and
 repetition. Use specific names; invent nothing and never imply a link between
-unrelated facts.
+unrelated facts. Later amendments, corrections, and retractions override the
+records they reference. Preserve the final outcome; retain the earlier account
+only when its history or failure reason remains useful.
 
 Never edit or delete a memory directory: the tool manages it.
 

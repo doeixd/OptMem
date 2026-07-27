@@ -1,7 +1,7 @@
 # Windows support
 
 OptMem runs on native Windows in PowerShell; WSL is not required. Windows uses
-the same append-only store format as Linux and macOS.
+the same fixed-width, append-first store format as Linux and macOS.
 
 ## Prerequisite
 
@@ -66,8 +66,9 @@ memo doctor
 ```
 
 `doctor` shows the executable, Python version, current Git origin, active
-scope, project/global store paths, and optional FFF status. It does not write
-anything.
+scope, project/global store paths, optional FFF/QMD status, and project origin
+identity. It does not write anything. Use `memo doctor --deep` to scan and
+verify the complete active store.
 
 ## Run commands
 
@@ -76,10 +77,19 @@ The installer makes the short command available:
 ```powershell
 memo wake
 memo note "first project memory"
+memo show 42
+memo amend 42 "corrected durable memory"
+memo retract 42 "obsolete after the rewrite"
 memo --global note "true in every project"
 memo recall --limit 5 --context 2 "deployment"
 memo zoom --depth 3 0-255
+memo export .\memories.txt
+memo import --dry-run .\memories.txt
 ```
+
+For large restores, `memo nap --batch 8` prints independent compression jobs.
+Write its requested TAB-separated summaries to a UTF-8 file and apply all of
+them with `memo nap --apply .\summaries.txt`.
 
 The launcher path remains a reliable fallback:
 
