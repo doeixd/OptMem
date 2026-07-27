@@ -14,7 +14,7 @@ and a polished agent/install workflow.
 
 ![how OptMem works](anim/optmem.gif)
 
-## 60-second setup
+## Installation
 
 Prerequisite: Python 3.7 or newer. FFF-powered fuzzy recall is optional and
 requires Python 3.10 or newer.
