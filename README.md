@@ -36,6 +36,8 @@ creates the global store without touching existing memories. It then prints a
 block between `BEGIN OPTMEM AGENT INSTRUCTIONS` and
 `END OPTMEM AGENT INSTRUCTIONS`.
 
+## Setup
+
 From the project you want to connect, add the instructions to both
 `AGENTS.md` and `CLAUDE.md`, then verify the setup:
 
