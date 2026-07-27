@@ -4,21 +4,45 @@ OptMem works by giving the agent a small, persistent instruction block. The
 block tells the agent when to read memory, what to save, and how to retrieve
 older information. You do not need an agent plugin or hosted service.
 
-## 1. Generate the instructions
+## 1. Connect the instructions
 
-Run:
+From the project the agent will work in, let OptMem safely add its managed
+block to both common instruction files:
 
 ```sh
-~/.optmem/memo init
+cd /path/to/project
+~/.optmem/memo setup --create
 ```
 
 On Windows PowerShell:
 
 ```powershell
-& "$HOME\.optmem\memo.cmd" init
+Set-Location C:\path\to\project
+& "$HOME\.optmem\memo.cmd" setup --create
 ```
 
-Copy everything between:
+The explicit `--create` permits missing `AGENTS.md` and `CLAUDE.md` files to
+be created. Without that flag, `setup` only updates existing files and reports
+each missing file it skipped. Use `--no-create` when a script should state
+that default explicitly.
+
+Existing files keep all of their content, with the OptMem block added at the
+top. Re-running the command changes nothing when the block is current and
+updates only the managed block when OptMem's instructions change.
+
+Pass one or more paths to target different files:
+
+```sh
+~/.optmem/memo setup AGENTS.md .github/agent-instructions.md
+```
+
+Add `--create` if any explicit target does not exist yet.
+
+`setup` checks every requested file before writing any of them. It refuses
+malformed managed markers, non-UTF-8 files, directories, and symbolic links
+instead of guessing or partially configuring the project.
+
+For manual setup, run `memo init` and copy everything between:
 
 ```text
 ----- BEGIN OPTMEM AGENT INSTRUCTIONS -----
@@ -28,7 +52,9 @@ Copy everything between:
 
 Paste it at the top of the persistent instruction file your agent reads for
 every session. Common filenames are `AGENTS.md` and `CLAUDE.md`; other agents
-may call this project instructions, rules, or system context.
+may call this project instructions, rules, or system context. The HTML
+`OPTMEM:START` and `OPTMEM:END` comments inside the generated block let a
+future `memo setup` update it safely.
 
 Use the generated block rather than copying the example from the README. It
 contains the executable path that works on your platform.
@@ -156,6 +182,10 @@ The parent agent remains responsible for recording the durable outcome.
 
 ## Keeping the instructions current
 
-After updating OptMem, run `memo init` again. It does not change existing
-memories; it prints the current instruction block. Replace the old block if
-the generated text or executable path changed.
+After updating OptMem, run `memo setup` again in each connected project. It
+updates only the content between OptMem's managed markers and does not change
+existing memories or the rest of either instruction file.
+
+If the instructions were copied before managed markers existed, `setup`
+reports an unmanaged legacy block and leaves it alone. Remove that old block
+once, then run `memo setup` to opt into managed updates.

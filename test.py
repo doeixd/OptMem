@@ -155,6 +155,7 @@ fresh["XDG_DATA_HOME"] = os.path.join(fresh["HOME"], ".local", "share")
 helped = subprocess.run(memo + ["--help"], capture_output=True, text=True,
                         env=fresh)
 check(helped.returncode == 0 and "Usage:" in helped.stdout
+      and "setup [--create|--no-create] [FILE ...]" in helped.stdout
       and "doctor" in helped.stdout and "recall --fuzzy" in helped.stdout,
       "--help is not a useful command overview:\n" + helped.stdout + helped.stderr)
 help_alias = subprocess.run(memo + ["help"], capture_output=True, text=True,
@@ -175,6 +176,104 @@ check(diagnosed.returncode == 0 and "OptMem doctor" in diagnosed.stdout
       + diagnosed.stdout + diagnosed.stderr)
 check(not os.path.exists(os.path.join(fresh["HOME"], ".optmem", "memory")),
       "doctor created the missing global store")
+
+# `setup` safely connects common agent instruction files without requiring a
+# memory to exist. It is repeatable, preserves user text, and preflights every
+# target before writing any of them.
+setup_dir = tempfile.mkdtemp(prefix="optmem-setup-")
+setup = subprocess.run(memo + ["setup"], cwd=setup_dir,
+                       capture_output=True, text=True, env=fresh)
+agents = os.path.join(setup_dir, "AGENTS.md")
+claude = os.path.join(setup_dir, "CLAUDE.md")
+check(setup.returncode == 0 and not os.path.exists(agents)
+      and not os.path.exists(claude)
+      and setup.stdout.count("Skipped missing:") == 2
+      and "--create" in setup.stdout,
+      "setup created missing instruction files without opt-in:\n"
+      + setup.stdout + setup.stderr)
+no_create = subprocess.run(memo + ["setup", "--no-create"], cwd=setup_dir,
+                           capture_output=True, text=True, env=fresh)
+check(no_create.returncode == 0 and not os.path.exists(agents)
+      and not os.path.exists(claude)
+      and no_create.stdout.count("Skipped missing:") == 2,
+      "setup --no-create did not enforce the safe default:\n"
+      + no_create.stdout + no_create.stderr)
+created = subprocess.run(memo + ["setup", "--create"], cwd=setup_dir,
+                         capture_output=True, text=True, env=fresh)
+check(created.returncode == 0 and os.path.isfile(agents)
+      and os.path.isfile(claude) and created.stdout.count("Added OptMem") == 2,
+      "setup --create did not create both default instruction files:\n"
+      + created.stdout + created.stderr)
+agents_before = open(agents, "rb").read()
+claude_before = open(claude, "rb").read()
+check(agents_before.count(cli.AGENT_START.encode()) == 1
+      and b"Your memory is OptMem:" in agents_before,
+      "AGENTS.md does not contain one managed instruction block")
+setup_again = subprocess.run(memo + ["setup"], cwd=setup_dir,
+                             capture_output=True, text=True, env=fresh)
+check(setup_again.returncode == 0
+      and setup_again.stdout.count("Already configured:") == 2
+      and open(agents, "rb").read() == agents_before
+      and open(claude, "rb").read() == claude_before,
+      "setup is not byte-for-byte idempotent:\n"
+      + setup_again.stdout + setup_again.stderr)
+check(not os.path.exists(os.path.join(fresh["HOME"], ".optmem", "memory")),
+      "setup created a memory store as a side effect")
+
+custom = os.path.join(setup_dir, "CUSTOM.md")
+with open(custom, "w", encoding="utf-8") as f:
+    f.write("# Existing instructions\n\nKeep this exactly.\n")
+custom_setup = subprocess.run(memo + ["setup", "CUSTOM.md"], cwd=setup_dir,
+                              capture_output=True, text=True, env=fresh)
+custom_text = open(custom, encoding="utf-8").read()
+check(custom_setup.returncode == 0
+      and custom_text.startswith(cli.AGENT_START)
+      and custom_text.endswith("# Existing instructions\n\nKeep this exactly.\n"),
+      "setup did not preserve existing custom instructions")
+
+# A block managed by a previous release is updated in place; surrounding user
+# content remains untouched.
+with open(custom, "w", encoding="utf-8") as f:
+    f.write("Before\n%s\nold generated instructions\n%s\nAfter\n"
+            % (cli.AGENT_START, cli.AGENT_END))
+updated = subprocess.run(memo + ["setup", custom], cwd=setup_dir,
+                         capture_output=True, text=True, env=fresh)
+custom_text = open(custom, encoding="utf-8").read()
+check(updated.returncode == 0 and "Updated OptMem" in updated.stdout
+      and custom_text.startswith("Before\n")
+      and custom_text.endswith("\nAfter\n")
+      and custom_text.count(cli.AGENT_START) == 1
+      and "Your memory is OptMem:" in custom_text,
+      "setup did not update one managed block in place")
+
+legacy = os.path.join(setup_dir, "LEGACY.md")
+legacy_text = "## Memory\n\nYour memory is OptMem:\n- hand maintained\n"
+with open(legacy, "w", encoding="utf-8") as f:
+    f.write(legacy_text)
+legacy_setup = subprocess.run(memo + ["setup", legacy], cwd=setup_dir,
+                              capture_output=True, text=True, env=fresh)
+check(legacy_setup.returncode == 0 and "unmanaged legacy block" in legacy_setup.stdout
+      and open(legacy, encoding="utf-8").read() == legacy_text,
+      "setup duplicated or changed legacy hand-copied instructions")
+
+malformed = os.path.join(setup_dir, "MALFORMED.md")
+untouched = os.path.join(setup_dir, "MUST-NOT-EXIST.md")
+with open(malformed, "w", encoding="utf-8") as f:
+    f.write(cli.AGENT_START + "\nmissing end\n")
+bad_setup = subprocess.run(memo + ["setup", "--create", untouched, malformed],
+                           cwd=setup_dir, capture_output=True, text=True,
+                           env=fresh)
+check(bad_setup.returncode == 1 and "Malformed OptMem markers" in bad_setup.stderr
+      and not os.path.exists(untouched),
+      "setup wrote a partial result before rejecting malformed markers:\n"
+      + bad_setup.stdout + bad_setup.stderr)
+conflicting_setup = subprocess.run(
+    memo + ["setup", "--create", "--no-create"], cwd=setup_dir,
+    capture_output=True, text=True, env=fresh)
+check(conflicting_setup.returncode == 1
+      and "either --create or --no-create" in conflicting_setup.stderr,
+      "setup accepted conflicting creation flags")
+
 noenv = subprocess.run(memo + ["wake"], capture_output=True, text=True, env=fresh)
 check(noenv.returncode == 0 and "No global memory yet" in noenv.stdout
       and " init" in noenv.stdout,
@@ -777,6 +876,8 @@ check("1 match" in r.stdout or "scoped memories" in r.stdout,
       "recall did not read the project memory: " + r.stdout + r.stderr)
 
 shutil.rmtree(repo)
+shutil.rmtree(setup_dir)
+shutil.rmtree(fresh["HOME"])
 shutil.rmtree(xdg)
 shutil.rmtree(d2)
 shutil.rmtree(d)

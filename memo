@@ -6,6 +6,8 @@ Usage:
 
 Start here:
   {memo} init                    create global memory; print agent instructions
+  {memo} setup [--create|--no-create] [FILE ...]
+                                 update AGENTS.md and CLAUDE.md safely
   {memo} doctor                  check installation, scope, stores, and FFF
   {memo} wake [part [T]]         read global then project memory
 
@@ -40,6 +42,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections import deque
 
 
@@ -630,6 +633,141 @@ is already known, and its notes would arrive duplicated and incorrectly.
 When you spawn one, write: `You are a subagent. Don't run memo.`
 """
 
+AGENT_START = "<!-- OPTMEM:START -->"
+AGENT_END = "<!-- OPTMEM:END -->"
+
+
+def instruction_dir():
+    """The global identity named in persistent agent instructions.
+
+    Setup does not open or create a memory store, so it deliberately ignores
+    the current project scope. MEMORY_DIR remains useful for custom installs.
+    """
+    return os.path.expanduser(os.environ.get("MEMORY_DIR") or GLOBAL)
+
+
+def agent_block(d, newline="\n"):
+    """The replaceable block written into an agent instruction file."""
+    body = TEMPLATE.format(memo=TOOL, data=pretty(d),
+                           chars=ENTRY_CHARS).rstrip()
+    return newline.join((AGENT_START, body.replace("\n", newline), AGENT_END))
+
+
+def _setup_plan(path, block_for, create):
+    """Preflight one instruction file without changing it."""
+    path = os.path.abspath(os.path.expanduser(path))
+    if os.path.islink(path):
+        die("Refusing to replace symlink %s." % pretty(path))
+    exists = os.path.exists(path)
+    if not exists and not create:
+        return path, b"", b"", "skipped", False
+    parent = os.path.dirname(path)
+    if not os.path.isdir(parent):
+        die("Parent directory does not exist: %s." % pretty(parent))
+    if os.path.isdir(path):
+        die("Instruction target is a directory: %s." % pretty(path))
+
+    raw = open(path, "rb").read() if exists else b""
+    bom = b"\xef\xbb\xbf" if raw.startswith(b"\xef\xbb\xbf") else b""
+    try:
+        text = raw[len(bom):].decode("utf-8")
+    except UnicodeDecodeError:
+        die("Instruction file is not UTF-8: %s." % pretty(path))
+
+    starts, ends = text.count(AGENT_START), text.count(AGENT_END)
+    if starts != ends or starts > 1:
+        die("Malformed OptMem markers in %s; expected one START/END pair."
+            % pretty(path))
+    if starts and text.index(AGENT_END) < text.index(AGENT_START):
+        die("Malformed OptMem markers in %s; END appears before START."
+            % pretty(path))
+    newline = "\r\n" if "\r\n" in text else "\n"
+    block = block_for(newline)
+    if starts:
+        lo = text.index(AGENT_START)
+        hi = text.index(AGENT_END, lo) + len(AGENT_END)
+        updated = text[:lo] + block + text[hi:]
+        action = "current" if updated == text else "updated"
+    elif "Your memory is OptMem:" in text:
+        # Older hand-copied instructions have no managed markers. Their
+        # presence still satisfies "if not already present"; never duplicate.
+        updated, action = text, "legacy"
+    else:
+        updated = block + (newline * 2 + text if text else newline)
+        action = "added"
+    return path, raw, bom + updated.encode("utf-8"), action, exists
+
+
+def _atomic_replace(path, data, existing):
+    """Replace one preflighted file in its directory, preserving its mode."""
+    parent = os.path.dirname(path)
+    mode = os.stat(path).st_mode if existing else None
+    fd, temporary = tempfile.mkstemp(prefix=".optmem-", suffix=".tmp",
+                                     dir=parent)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        if mode is not None:
+            os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def cmd_setup(d, args):
+    """Install the managed instructions into one or more agent files."""
+    create, explicit_no_create, targets = False, False, []
+    for arg in args:
+        if arg == "--create":
+            create = True
+        elif arg == "--no-create":
+            explicit_no_create = True
+        elif arg.startswith("--"):
+            die("Unknown setup option: %s.\nUsage: %s setup "
+                "[--create|--no-create] [FILE ...]" % (arg, TOOL))
+        else:
+            targets.append(arg)
+    if create and explicit_no_create:
+        die("Use either --create or --no-create, not both.")
+    targets = targets or ["AGENTS.md", "CLAUDE.md"]
+    unique, seen = [], set()
+    for target in targets:
+        key = os.path.normcase(os.path.realpath(os.path.abspath(
+            os.path.expanduser(target))))
+        if key not in seen:
+            seen.add(key)
+            unique.append(target)
+
+    block_for = lambda newline: agent_block(d, newline)
+    plans = [_setup_plan(target, block_for, create) for target in unique]
+    # Preflight every target before the first write. A malformed second file
+    # must not leave the first file half-configured.
+    for path, before, after, action, existing in plans:
+        if action not in ("current", "legacy", "skipped"):
+            current_exists = os.path.exists(path)
+            current = open(path, "rb").read() if current_exists else b""
+            if current_exists != existing or current != before:
+                die("Instruction file changed during setup: %s." % pretty(path))
+            _atomic_replace(path, after, existing)
+        if action == "added":
+            print("Added OptMem instructions to %s." % pretty(path))
+        elif action == "updated":
+            print("Updated OptMem instructions in %s." % pretty(path))
+        elif action == "legacy":
+            print("Already configured: %s (unmanaged legacy block)."
+                  % pretty(path))
+        elif action == "skipped":
+            print("Skipped missing: %s (use --create to create it)."
+                  % pretty(path))
+        else:
+            print("Already configured: %s." % pretty(path))
+
 
 def cmd_init(d, args):
     """The one command that may create the memory directory, and the whole
@@ -651,16 +789,16 @@ def cmd_init(d, args):
     print("Configuration: %s" % pretty(os.path.join(d, "config")))
     print()
     print("Connect your agent:")
-    print("  1. Copy everything between the BEGIN and END markers.")
-    print("  2. Paste it at the top of AGENTS.md, CLAUDE.md, or your agent's")
-    print("     persistent instruction file.")
-    print("  3. Start a new agent session in a project and let it run wake.")
+    print("  Automatic: run %s setup in your project." % TOOL)
+    print("  Add --create if AGENTS.md or CLAUDE.md does not exist yet.")
+    print("  Manual: copy everything between the BEGIN and END markers into")
+    print("  AGENTS.md, CLAUDE.md, or your agent's persistent instruction file.")
+    print("  Then start a new agent session in the project and let it run wake.")
     print()
     print("----- BEGIN OPTMEM AGENT INSTRUCTIONS -----")
     # The block is pasted once and read in every project, so commands in it
     # must name the tool without inheriting the current --global scope.
-    print(TEMPLATE.format(memo=TOOL, data=pretty(d),
-                          chars=ENTRY_CHARS).rstrip())
+    print(agent_block(d))
     print("----- END OPTMEM AGENT INSTRUCTIONS -----")
     print()
     print("Verify this installation any time with: %s doctor" % TOOL)
@@ -1071,7 +1209,8 @@ def cmd_doctor(d, args):
         print("the tool's full path.")
 
 
-COMMANDS = {"init": cmd_init, "wake": cmd_wake, "note": cmd_note,
+COMMANDS = {"init": cmd_init, "setup": cmd_setup, "wake": cmd_wake,
+            "note": cmd_note,
             "nap": cmd_nap, "recall": cmd_recall, "zoom": cmd_zoom,
             "forget": cmd_forget, "config": cmd_config, "import": cmd_import,
             "doctor": cmd_doctor}
@@ -1109,6 +1248,9 @@ def main():
             # no ceremony and appear on first use.
             SCOPE_GLOBAL = not os.environ.get("MEMORY_DIR")
             cmd_init(memory_dir(), argv[1:])
+            return
+        if cmd == "setup":
+            cmd_setup(instruction_dir(), argv[1:])
             return
         if cmd == "wake" and not SCOPE_GLOBAL and not os.environ.get("MEMORY_DIR"):
             wake_both(argv[1:])

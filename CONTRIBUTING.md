@@ -58,6 +58,9 @@ Please preserve these unless a change explicitly redesigns them:
 - Concurrent writers must receive unique IDs without losing records.
 - Re-running `memo init` or either installer must preserve memory data and
   user configuration.
+- `memo setup` must preserve non-OptMem instructions, remain byte-for-byte
+  idempotent when current, skip missing files unless `--create` is explicit,
+  and preflight every target before writing.
 
 ## Validation
 
@@ -111,5 +114,7 @@ import or required installer dependency.
 - Consider native Windows path, locking, quoting, and home-directory behavior.
 - Keep error messages actionable and free of tracebacks for expected failures.
 - Keep README examples synchronized with the generated agent template.
+- Test instruction setup against missing, existing, legacy, updated, and
+  malformed files.
 - Do not edit memory files in tests outside temporary directories.
 - Do not commit generated caches, test memories, or native wheels.

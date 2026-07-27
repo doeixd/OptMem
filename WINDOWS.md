@@ -36,6 +36,26 @@ It then initializes `$HOME\.optmem\memory` and prints a copyable agent
 instruction block. Re-running the installer updates the tool and launcher
 without changing memories or configuration.
 
+## Connect an agent
+
+From the repository the agent will work in:
+
+```powershell
+Set-Location C:\path\to\project
+& "$HOME\.optmem\memo.cmd" setup --create
+```
+
+This safely creates or updates managed OptMem instructions in both
+`AGENTS.md` and `CLAUDE.md` while preserving all other content. It is
+idempotent. Creation requires the explicit `--create` flag shown above;
+without it, missing files are skipped. `--no-create` can state that safe
+default explicitly in scripts. Pass explicit paths to target only selected
+files:
+
+```powershell
+& "$HOME\.optmem\memo.cmd" setup .\AGENTS.md
+```
+
 ## Verify
 
 ```powershell

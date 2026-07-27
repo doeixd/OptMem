@@ -36,21 +36,43 @@ creates the global store without touching existing memories. It then prints a
 block between `BEGIN OPTMEM AGENT INSTRUCTIONS` and
 `END OPTMEM AGENT INSTRUCTIONS`.
 
-1. Copy that block into the top of `AGENTS.md`, `CLAUDE.md`, or your agent's
-   persistent instruction file.
-2. Start a new agent session inside a project.
-3. Verify the setup:
+From the project you want to connect, add the instructions to both
+`AGENTS.md` and `CLAUDE.md`, then verify the setup:
 
 ```sh
+cd /path/to/project
+~/.optmem/memo setup --create
 ~/.optmem/memo doctor
 ```
 
 On Windows:
 
 ```powershell
+Set-Location C:\path\to\project
+& "$HOME\.optmem\memo.cmd" setup --create
 & "$HOME\.optmem\memo.cmd" doctor
 ```
 
+By default, `setup` only updates files that already exist; it skips missing
+files and tells you how to opt in. The `--create` above explicitly permits it
+to create missing `AGENTS.md` and `CLAUDE.md` files. Existing files keep all
+of their other content. It is safe to run again: current blocks are left
+byte-for-byte unchanged and older managed blocks are updated in place.
+
+To target another existing instruction file, pass it explicitly:
+
+```sh
+~/.optmem/memo setup path/to/agent-rules.md
+```
+
+Add `--create` when that explicit file does not exist yet. `--no-create` is
+also available when a script should state the safe default explicitly.
+
+If you prefer manual setup, copy the block printed by the installer into your
+agent's persistent instruction file. Existing hand-copied blocks are detected
+and are never duplicated.
+
+Start a new agent session inside the project after connecting the files.
 Adding `~/.optmem` to `PATH` is optional. Generated agent instructions use the
 full executable path, so they work immediately.
 
@@ -126,6 +148,8 @@ directory. Run `memo doctor` whenever the selected scope is surprising.
 
 | Command | Purpose |
 |---|---|
+| `memo init` | create the global memory and print the current agent instructions |
+| `memo setup [--create\|--no-create] [FILE ...]` | update instructions in existing files; defaults to `AGENTS.md` and `CLAUDE.md`, with creation opt-in |
 | `memo doctor` | explain the active scope, store paths, Python, PATH, Git origin, and FFF availability |
 | `memo wake` | read both memories — global, then project; first command of every session |
 | `memo note "..."` | record one memory: one line, up to 280 chars (project by default) |
@@ -244,9 +268,10 @@ Developing or contributing? See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Agent instruction block (reference)
 
-The installer prints the authoritative block with the correct executable path
-for the current platform. The Unix form is shown here for review; copy the
-generated version rather than hand-editing this example.
+`memo setup` writes the authoritative block with the correct executable path
+for the current platform. The Unix form is shown here for review; use the
+command or copy the version printed by `memo init` rather than hand-editing
+this example.
 
 ```markdown
 ## Memory
