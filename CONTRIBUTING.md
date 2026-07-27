@@ -74,8 +74,16 @@ Please preserve these unless a change explicitly redesigns them:
 - `zoom --depth` must preserve left-to-right tree order and remain within the
   shared output limits.
 - Concurrent writers must receive unique IDs without losing records.
-- Project stores retain a host-aware origin claim; a colliding legacy
-  `owner/repo` scope must warn without rewriting that identity.
+- Hosted project identity includes the complete host and namespace. Remote
+  selection is deterministic: `OPTMEM_REMOTE`, usable `origin`, tracked
+  remote, sole usable remote, then path fallback.
+- Compatible legacy stores stay in place when their recorded identity or safe
+  alias matches. A claimed legacy collision must select an isolated store and
+  never rewrite or merge either identity.
+- `memo scope` and `doctor` are read-only. A path identity marker may be
+  created only on first memory use; it belongs inside `.git` when possible and
+  otherwise in `.optmem-scope`. `scope-map.json` may link that identity to a
+  compatible old store without moving memory data.
 - Re-running `memo init` or either installer must preserve memory data and
   user configuration.
 - Installers must add the canonical `memo` command to user PATH idempotently

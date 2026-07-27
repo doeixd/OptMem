@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.1.0 — 2026-07-27
+
+### Automatic project scope
+
+- Added read-only `memo scope` diagnostics for the selected project, store,
+  detection source, remote, and compatibility layout.
+- Hosted projects now use their complete `host/namespace/repository` identity
+  and collision-resistant store keys instead of collapsing to `owner/repo`.
+- Added deterministic remote selection beyond `origin`: tracked and sole
+  remotes are detected automatically, with `OPTMEM_REMOTE` for intentional
+  multi-remote selection.
+- Claimed legacy host/namespace collisions now receive isolated stores instead
+  of sharing history; matching legacy stores remain in place without migration.
+- Projects without a usable remote gain a portable identity marker on first
+  memory use, preserving scope across directory and filesystem moves. Existing
+  path-based stores are linked without moving or rewriting their memories.
+
+### Setup and guidance
+
+- Clarified that `memo setup` teaches agents to use the CLI by updating
+  existing `AGENTS.md` and `CLAUDE.md` files; creating missing files remains
+  an explicit `--create` choice.
+- Reworked `memo --help` around connection, retrieval, maintenance, optional
+  integrations, scope precedence, and copyable examples.
+
 ## 1.0.1 — 2026-07-27
 
 ### Wake reliability

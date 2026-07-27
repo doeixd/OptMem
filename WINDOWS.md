@@ -62,14 +62,16 @@ memo setup .\AGENTS.md
 ## Verify
 
 ```powershell
+memo scope
 memo doctor
 memo --version
 ```
 
-`doctor` shows the executable, Python version, current Git origin, active
-scope, project/global store paths, optional FFF/QMD status, and project origin
-identity. It does not write anything. Use `memo doctor --deep` to scan and
-verify the complete active store.
+`scope` shows the automatically selected project, store, and detection source.
+`doctor` adds the executable, Python version, selected Git remote, active
+scope, project/global store paths, optional FFF/QMD status, and project
+identity. Neither command writes anything. Use `memo doctor --deep` to scan
+and verify the complete active store.
 
 ## Run commands
 
@@ -193,8 +195,10 @@ parallel agent sessions serialize their updates safely.
   missing user PATH entry.
 - Tab completion is missing: open a new PowerShell window or re-run the
   installer to repair the completion line in your user profile.
-- The wrong store is active: run `memo doctor`, then check `MEMORY_DIR`, the
-  current directory, and `Git origin`.
+- The wrong store is active: run `memo scope`, then check `MEMORY_DIR`, the
+  current directory, and selected Git remote. Set
+  `$env:OPTMEM_REMOTE = 'name'` when an origin-less multi-remote checkout is
+  intentionally ambiguous.
 - Python opens the Microsoft Store: install Python from
   [python.org](https://www.python.org/downloads/windows/) or configure an
   existing Python so `py -3` works.

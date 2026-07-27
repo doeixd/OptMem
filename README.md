@@ -43,12 +43,13 @@ the PowerShell installer updates the current session immediately.
 
 ## Setup
 
-From the project you want to connect, add the instructions to both
-`AGENTS.md` and `CLAUDE.md`, then verify the setup:
+From the project you want to connect, teach your agent how to use the `memo`
+CLI, then verify the automatic project scope:
 
 ```sh
 cd /path/to/project
-memo setup --create
+memo setup
+memo scope
 memo doctor
 ```
 
@@ -56,15 +57,19 @@ On Windows:
 
 ```powershell
 Set-Location C:\path\to\project
-memo setup --create
+memo setup
+memo scope
 memo doctor
 ```
 
-By default, `setup` only updates files that already exist; it skips missing
-files and tells you how to opt in. The `--create` above explicitly permits it
-to create missing `AGENTS.md` and `CLAUDE.md` files. Existing files keep all
-of their other content. It is safe to run again: current blocks are left
-byte-for-byte unchanged and older managed blocks are updated in place.
+`memo setup` adds a managed OptMem instruction block to `AGENTS.md` and
+`CLAUDE.md` when those files exist. The block explains how the agent should
+use the CLI: when to wake memory, what belongs in a note, how project and
+global scopes differ, and how to recall and compress memories. Missing files
+are skipped by default; use `memo setup --create` to explicitly create them.
+Existing files keep all of their other content. It is safe to run setup again:
+current blocks are left byte-for-byte unchanged and older managed blocks are
+updated in place.
 
 To target another existing instruction file, pass it explicitly:
 
@@ -82,6 +87,10 @@ and are never duplicated.
 Start a new agent session inside the project after connecting the files.
 Generated agent instructions still use the full executable path, so they work
 even before a new shell picks up PATH changes.
+
+`setup` manages instruction files only; it does not create or select a memory
+store. Scope is detected when `memo` runs. `memo scope` is a read-only preview
+of the project identity, selected store, and reason for the selection.
 
 <details>
 <summary>Review the installer before running it</summary>
@@ -165,12 +174,17 @@ participate in `note`, `nap`, or `wake`.
 project memory second. Other commands target only one scope. Put `--global`
 before the command—not after it.
 
-Projects are keyed by the Git `origin` reduced to `owner/repo`, so worktrees
-and differently named checkouts share memory. OptMem also records the
-host-aware origin identity and `doctor` warns if, for example,
-`github.com/acme/api` and `gitlab.com/acme/api` collide at that legacy path.
-Without an origin, OptMem falls back to the repository root; outside Git, it
-falls back to the current directory.
+Hosted Git projects use their full `host/namespace/repository` identity, so
+worktrees and differently named checkouts share memory while different hosts
+and deep GitLab-style namespaces remain isolated. OptMem prefers `origin`,
+then the current branch's tracked remote, then a sole usable remote. Set
+`OPTMEM_REMOTE=<name>` when a multi-remote checkout needs an explicit choice.
+
+Without a usable remote, OptMem uses the Git root or current directory. On
+first memory use it writes a tiny stable identity marker inside `.git` for a
+Git checkout, or `.optmem-scope` for a non-Git directory. That lets the project
+keep its memory when moved or renamed, including across filesystems. Read-only
+commands such as `scope` and `doctor` never create the marker or a store.
 
 ## Commands
 
@@ -178,10 +192,11 @@ falls back to the current directory.
 |---|---|
 | `memo version` / `memo --version` | print the installed OptMem release |
 | `memo init` | create the global memory and print the current agent instructions |
-| `memo setup [--create\|--no-create] [FILE ...]` | update instructions in existing files; defaults to `AGENTS.md` and `CLAUDE.md`, with creation opt-in |
+| `memo setup [--create\|--no-create] [FILE ...]` | teach agents to use the `memo` CLI by updating existing instruction files; defaults to `AGENTS.md` and `CLAUDE.md`, with creation opt-in |
 | `memo completion <shell>` | print completion for Bash, Zsh, Fish, or PowerShell |
 | `memo upgrade` | install the latest GitHub release, validate it, and refresh PATH/completion setup |
 | `memo uninstall` | remove the command and shell integration while preserving every memory |
+| `memo scope` | show the automatically detected project, store, remote/path source, and compatibility layout without creating anything |
 | `memo doctor [--deep]` | explain setup and scope; optionally verify the raw log, tree, lifecycle references, and QMD projection state |
 | `memo qmd enable` | explicitly enable optional QMD semantic recall for this scope |
 | `memo qmd help` | explain the integration’s commands, isolation, and lazy behavior |
@@ -369,12 +384,12 @@ interleaved projects make each one's detail decay while work happens
 elsewhere, so an old project can wake up with its memories intact in the log
 but out of reach of the context budget.
 
-Every command therefore speaks to the memory of the project in `$PWD`, keyed
-by the origin remote reduced to `owner/repo` (every worktree and host alias for
-one repo is one memory). `--global` reaches the one that follows you
-everywhere. `wake` alone reads both: who you are, then where you are. Almost
-everything belongs in the project; use `--global` only for what would still be
-true tomorrow in a repository you have never seen.
+Every command therefore speaks to the automatically detected project in
+`$PWD`. Hosted repositories use the complete remote identity; projects without
+a usable remote use a portable local marker. `--global` reaches the one memory
+that follows you everywhere. `wake` alone reads both: who you are, then where
+you are. Almost everything belongs in the project; use `--global` only for
+what would still be true tomorrow in a repository you have never seen.
 
 ## Files
 
@@ -387,11 +402,20 @@ true tomorrow in a repository you have never seen.
     TREE/           the summaries: a cache, rebuildable from the log alone
     QMD/            optional 16-memory Markdown projection, fully disposable
     config          the sizes, written by `memo config`
-    scope.json      project stores only: host identity and origin aliases
+    scope.json      project stores only: canonical identity and safe aliases
 
 $XDG_DATA_HOME/optmem/   (default: ~/.local/share/optmem)
-  repo/<owner>/<repo>/   one memory per project, same layout as memory/
+  repo-v2/<name>-<hash>/ collision-resistant hosted-repository stores
+  path-v2/<name>-<hash>/ local/path project stores
+  repo/ and path/        compatible stores retained from older releases
+  scope-map.json         links stable local identities to compatible stores
 ```
+
+New hosted-project directory names use a readable repository label plus a
+SHA-256-derived identity suffix; `scope.json` retains the full human-readable
+identity. Existing compatible stores continue in place. If an old
+`owner/repo` store is already claimed by a different host or namespace, OptMem
+selects an isolated new store instead of mixing the histories.
 
 ```sh
 memo config                  # show the sizes
@@ -448,6 +472,7 @@ projection removed.
 Start troubleshooting with:
 
 ```sh
+memo scope
 memo doctor
 memo --help
 ```
@@ -456,8 +481,10 @@ Common fixes:
 
 - `memo: command not found`: open a new shell after installing, or re-run the
   installer to repair the PATH entry.
-- The wrong project memory appears: run `memo doctor` and check the current
-  directory and Git origin.
+- The wrong project memory appears: run `memo scope` and check the current
+  directory, selected remote, and detection source. In a checkout with several
+  remotes and no suitable `origin` or tracked branch, set
+  `OPTMEM_REMOTE=<remote-name>`.
 - No global memory exists: run `memo init`.
 - Fuzzy recall is unavailable: exact regex recall still works; install
   `fff-search` under Python 3.10+ to enable it.
@@ -502,6 +529,8 @@ with coarser summaries for older history and finer detail toward the present.
 Run `memo wake` before any other tool call, in every session, and
 then do exactly what it prints, to the end of its output. It reads the
 global memory first, then the memory of the project you are in.
+If the selected project is ever unclear, `memo scope` reports the identity,
+store, and detection source without changing memory.
 
 ### While working: register memories (mandatory)
 

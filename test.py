@@ -186,7 +186,8 @@ check(helped.returncode == 0 and "Usage:" in helped.stdout
       and "setup [--create|--no-create] [FILE ...]" in helped.stdout
       and "completion <shell>" in helped.stdout
       and "upgrade" in helped.stdout and "uninstall" in helped.stdout
-      and "doctor" in helped.stdout and "qmd [help]" in helped.stdout
+      and "scope" in helped.stdout and "doctor" in helped.stdout
+      and "qmd [help]" in helped.stdout
       and "recall [options]" in helped.stdout and "amend <id>" in helped.stdout
       and "resummarize" in helped.stdout and "export [--with-ids]" in
           helped.stdout,
@@ -215,7 +216,8 @@ for shell, signature in completion_signatures.items():
     check(completed.returncode == 0 and signature in completed.stdout,
           "%s completion is missing or invalid:\n%s%s"
           % (shell, completed.stdout, completed.stderr))
-    check("upgrade" in completed.stdout and "uninstall" in completed.stdout,
+    check("upgrade" in completed.stdout and "uninstall" in completed.stdout
+          and "scope" in completed.stdout,
           "%s completion omits maintenance commands" % shell)
     check("version" in completed.stdout,
           "%s completion omits the version command" % shell)
@@ -256,6 +258,14 @@ check(diagnosed.returncode == 0 and "OptMem doctor" in diagnosed.stdout
       + diagnosed.stdout + diagnosed.stderr)
 check(not os.path.exists(os.path.join(fresh["HOME"], ".optmem", "memory")),
       "doctor created the missing global store")
+scoped = subprocess.run(memo + ["scope"], capture_output=True, text=True,
+                        env=fresh)
+check(scoped.returncode == 0 and "OptMem scope" in scoped.stdout
+      and "Project:" in scoped.stdout and "Store:" in scoped.stdout
+      and "Source:" in scoped.stdout
+      and not os.path.exists(os.path.join(fresh["XDG_DATA_HOME"], "optmem")),
+      "scope did not explain selection read-only:\n"
+      + scoped.stdout + scoped.stderr)
 fresh_qmd_status = subprocess.run(
     memo + ["qmd", "status"], capture_output=True, text=True, env=fresh)
 check(fresh_qmd_status.returncode == 0
@@ -1710,49 +1720,225 @@ os.environ.pop("MEMORY_DIR", None)
 real_git = cli.git
 
 
-def as_repo(url, checkout=""):
-    """Resolve a scope with a fake origin and checkout."""
+def fake_scope_git(remotes=None, checkout="", upstream=""):
+    """A deterministic Git view for scope-selection unit tests."""
+    remotes = remotes or {}
+
     def fake_git(*args):
-        if args[:2] == ("remote", "get-url"):
-            return url or ""
+        if args == ("remote",):
+            return "\n".join(sorted(remotes))
+        if args[:2] == ("remote", "get-url") and len(args) == 3:
+            return remotes.get(args[2], "")
         if args[:2] == ("rev-parse", "--show-toplevel"):
             return checkout
+        if args == ("rev-parse", "--abbrev-ref", "--symbolic-full-name",
+                    "@{upstream}"):
+            return upstream
         return ""
-    cli.git = fake_git
+    return fake_git
+
+
+def as_scope(remotes=None, checkout="", upstream=""):
+    cli.git = fake_scope_git(remotes, checkout, upstream)
     try:
-        return cli.scope_dir()
+        return cli.project_scope()
     finally:
         cli.git = real_git
 
 
-ssh = as_repo("git@github-texarkanine.com:Texarkanine/OptMem.git")
-check(ssh == os.path.join(xdg, "optmem", "repo", "Texarkanine", "OptMem"),
-      "an ssh remote did not reduce to owner/repo: " + ssh)
-check(as_repo("https://github.com/Texarkanine/OptMem") == ssh,
+ssh = as_scope({"origin": "git@github.com:Texarkanine/OptMem.git"})
+check("repo-v2" in ssh["store"] and ssh["project"] ==
+      "github.com/Texarkanine/OptMem",
+      "an ssh remote did not become a full hosted identity: " + ssh["store"])
+check(as_scope({"origin": "https://github.com/Texarkanine/OptMem"})["store"]
+      == ssh["store"],
       "one repo split across two remote spellings")
-check(as_repo("git@github.com:Texarkanine/OptMem.git/") == ssh,
+check(as_scope({"origin": "git@github.com:Texarkanine/OptMem.git/"})["store"]
+      == ssh["store"],
       "a trailing slash forked the memory of one repo")
-check(as_repo("https://token@github.com/Texarkanine/OptMem.git?secret=yes")
-      == ssh, "a credentialed remote leaked into or split project scope")
+check(as_scope({
+          "origin": "https://token@github.com/Texarkanine/OptMem.git?secret=yes"
+      })["store"] == ssh["store"],
+      "a credentialed remote leaked into or split project scope")
+other_host = as_scope({
+    "origin": "git@github-texarkanine.com:Texarkanine/OptMem.git"})
+check(other_host["store"] != ssh["store"],
+      "different Git hosts still collide in one project scope")
 check(cli.canonical_origin("git@github.com:acme/api.git") ==
       "github.com/acme/api"
       and cli.canonical_origin("https://github.com/acme/api.git") ==
       "github.com/acme/api"
       and cli.canonical_origin("https://gitlab.com/acme/api.git") ==
-      "gitlab.com/acme/api",
+      "gitlab.com/acme/api"
+      and cli.canonical_origin(
+          "https://gitlab.com/acme/platform/services/api.git") ==
+      "gitlab.com/acme/platform/services/api",
       "host-aware origin canonicalization is unstable")
 check(cli.safe_origin_alias(
           "https://secret-token@github.com/acme/api.git?credential=hidden") ==
       "https://github.com/acme/api.git",
       "scope identity alias retained URL credentials")
-fallback = as_repo(None, os.path.abspath(os.sep + os.path.join("work", "repo")))
-check(fallback.startswith(os.path.join(xdg, "optmem", "path")),
-      "no remote did not fall back to a portable path: " + fallback)
-check(":" not in os.path.relpath(fallback, os.path.join(xdg, "optmem")),
-      "the fallback scope contains an invalid Windows drive separator: "
-      + fallback)
-check(as_repo("", os.path.abspath(os.sep + os.path.join("work", "repo")))
-      == fallback, "an empty remote is not the no-remote case")
+
+deep_a = as_scope({
+    "origin": "https://gitlab.com/acme/platform/services/api.git"})
+deep_b = as_scope({
+    "origin": "https://gitlab.com/other/platform/services/api.git"})
+check(deep_a["store"] != deep_b["store"]
+      and deep_a["project"] == "gitlab.com/acme/platform/services/api",
+      "deep hosted namespaces still collapse to their final owner/repo")
+
+sole = as_scope({"upstream": "git@github.com:acme/sole.git"})
+check(sole["remote_name"] == "upstream"
+      and "only usable Git remote" in sole["source"],
+      "a sole non-origin remote was not selected automatically")
+tracked = as_scope({
+    "fork": "git@github.com:user/tool.git",
+    "upstream": "git@github.com:acme/tool.git",
+}, upstream="upstream/main")
+check(tracked["remote_name"] == "upstream"
+      and tracked["project"] == "github.com/acme/tool",
+      "the tracked remote did not resolve an origin-less checkout")
+ambiguous_root = tempfile.mkdtemp(prefix="optmem-ambiguous-")
+ambiguous = as_scope({
+    "fork": "git@github.com:user/tool.git",
+    "upstream": "git@github.com:acme/tool.git",
+}, checkout=ambiguous_root)
+check(ambiguous["kind"] == "path"
+      and "ambiguous remotes" in ambiguous["source"],
+      "ambiguous remotes were guessed instead of using the checkout")
+os.environ["OPTMEM_REMOTE"] = "fork"
+try:
+    explicit = as_scope({
+        "fork": "git@github.com:user/tool.git",
+        "upstream": "git@github.com:acme/tool.git",
+    }, checkout=ambiguous_root)
+finally:
+    os.environ.pop("OPTMEM_REMOTE")
+check(explicit["remote_name"] == "fork"
+      and explicit["project"] == "github.com/user/tool"
+      and explicit["source"] == "OPTMEM_REMOTE",
+      "OPTMEM_REMOTE did not resolve an intentionally selected remote")
+
+# New path scopes follow a moved directory on the same filesystem without
+# leaving marker files in the project.
+path_project = tempfile.mkdtemp(prefix="optmem-path-project-")
+path_before = as_scope({}, path_project)
+check(not os.path.exists(os.path.join(path_project, ".optmem-scope"))
+      and not os.path.exists(path_before["store"]),
+      "read-only path scope inspection created identity or storage")
+cli.git = fake_scope_git({}, path_project)
+try:
+    path_store = cli.store()
+finally:
+    cli.git = real_git
+check(os.path.isfile(os.path.join(path_project, ".optmem-scope")),
+      "first path-memory use did not create its portable identity marker")
+path_moved = path_project + "-moved"
+os.rename(path_project, path_moved)
+path_after = as_scope({}, path_moved)
+check(path_store == path_after["store"]
+      and path_after["identity"].startswith("marker:")
+      and "stable across directory and filesystem moves" in
+          path_after["source"],
+      "moving a path-scoped project changed its automatic memory scope")
+
+# Concurrent first use must converge on one marker and one store.
+race_project = tempfile.mkdtemp(prefix="optmem-path-race-")
+race_env = dict(os.environ, XDG_DATA_HOME=xdg)
+writers = [
+    subprocess.Popen(memo + ["note", "path scope writer %d" % index],
+                     cwd=race_project, env=race_env,
+                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    for index in range(2)
+]
+race_results = [writer.communicate() + (writer.returncode,)
+                for writer in writers]
+race_scope = as_scope({}, race_project)
+check(all(result[2] == 0 for result in race_results)
+      and os.path.isfile(os.path.join(race_project, ".optmem-scope"))
+      and os.path.getsize(os.path.join(race_scope["store"], "LOG.txt")) ==
+          2 * cli.LOG_REC,
+      "concurrent path-scope initialization split or lost memory:\n"
+      + "\n".join(stdout + stderr
+                  for stdout, stderr, _ in race_results))
+
+invalid_marker_project = tempfile.mkdtemp(prefix="optmem-invalid-marker-")
+with open(os.path.join(invalid_marker_project, ".optmem-scope"), "w") as f:
+    f.write("not an OptMem marker\n")
+invalid_scope = subprocess.run(
+    memo + ["scope"], cwd=invalid_marker_project, env=race_env,
+    capture_output=True, text=True)
+invalid_note = subprocess.run(
+    memo + ["note", "must not enter an ambiguous scope"],
+    cwd=invalid_marker_project, env=race_env, capture_output=True, text=True)
+check(invalid_scope.returncode == 0 and "Warning:" in invalid_scope.stdout
+      and "invalid or unsafe" in invalid_scope.stdout
+      and invalid_note.returncode == 1
+      and "Path-scope marker is invalid or unsafe" in invalid_note.stderr
+      and "Traceback" not in invalid_note.stderr,
+      "an invalid path marker was hidden or silently replaced:\n"
+      + invalid_scope.stdout + invalid_scope.stderr
+      + invalid_note.stdout + invalid_note.stderr)
+
+# Existing path-based stores gain a central identity link on first use, so the
+# same move compatibility applies without moving or rewriting the store.
+legacy_project = tempfile.mkdtemp(prefix="optmem-legacy-project-")
+legacy_store = cli._legacy_path_dir(cli._scope_root(), legacy_project)
+os.makedirs(os.path.join(legacy_store, "TREE"))
+open(os.path.join(legacy_store, "LOG.txt"), "a").close()
+cli.git = fake_scope_git({}, legacy_project)
+try:
+    check(cli.project_scope()["store"] == legacy_store,
+          "an existing legacy path store was not preserved")
+    check(cli.store() == legacy_store,
+          "using an existing legacy path store selected another store")
+finally:
+    cli.git = real_git
+legacy_moved = legacy_project + "-moved"
+os.rename(legacy_project, legacy_moved)
+linked = as_scope({}, legacy_moved)
+check(linked["store"] == legacy_store and linked["layout"] == "linked path",
+      "a moved legacy path store was not recovered through scope-map.json")
+
+# A claimed legacy owner/repo store must not be reused by another host.
+collision_legacy = os.path.join(
+    xdg, "optmem", "repo", "acme", "collision")
+os.makedirs(os.path.join(collision_legacy, "TREE"))
+open(os.path.join(collision_legacy, "LOG.txt"), "a").close()
+with open(os.path.join(collision_legacy, "scope.json"), "w",
+          encoding="utf-8") as f:
+    json.dump({"version": 1, "canonical": "github.com/acme/collision",
+               "aliases": ["git@github.com:acme/collision.git"]}, f)
+isolated = as_scope({
+    "origin": "https://gitlab.com/acme/collision.git"})
+check(isolated["store"] != collision_legacy
+      and isolated["project"] == "gitlab.com/acme/collision"
+      and "isolated store" in isolated["warning"],
+      "a cross-host legacy collision was not isolated")
+
+# Old releases truncated deep namespaces in `canonical`, but retained the full
+# remote alias. That alias safely proves ownership and upgrades in place.
+deep_legacy = os.path.join(xdg, "optmem", "repo", "services", "api")
+os.makedirs(os.path.join(deep_legacy, "TREE"))
+open(os.path.join(deep_legacy, "LOG.txt"), "a").close()
+deep_url = "https://gitlab.com/acme/platform/services/api.git"
+with open(os.path.join(deep_legacy, "scope.json"), "w",
+          encoding="utf-8") as f:
+    json.dump({"version": 1, "canonical": "gitlab.com/services/api",
+               "aliases": [deep_url]}, f)
+cli.git = fake_scope_git({"origin": deep_url})
+try:
+    check(cli.project_scope()["store"] == deep_legacy,
+          "a matching deep-namespace legacy store was abandoned")
+    check(cli.store() == deep_legacy,
+          "a matching legacy store was not used during identity upgrade")
+finally:
+    cli.git = real_git
+with open(os.path.join(deep_legacy, "scope.json"), encoding="utf-8") as f:
+    upgraded_identity = json.load(f)
+check(upgraded_identity["canonical"] ==
+      "gitlab.com/acme/platform/services/api",
+      "a safely matched legacy identity was not upgraded to its full namespace")
 
 # --global reaches the one memory that is not a project's, and nothing else.
 cli.SCOPE_GLOBAL = True
@@ -1767,13 +1953,26 @@ repo = tempfile.mkdtemp(prefix="optmem-repo-")
 subprocess.run(["git", "init", "-q", repo], check=True)
 subprocess.run(["git", "-C", repo, "remote", "add", "origin",
                 "git@github.com:acme/widget.git"], check=True)
+bad_remote = subprocess.run(
+    memo + ["scope"], cwd=repo, capture_output=True, text=True,
+    env=dict(os.environ, XDG_DATA_HOME=xdg, OPTMEM_REMOTE="missing"))
+check(bad_remote.returncode == 1
+      and "OPTMEM_REMOTE names 'missing'" in bad_remote.stderr
+      and "origin" in bad_remote.stderr
+      and "Traceback" not in bad_remote.stderr,
+      "an invalid explicit remote did not fail actionably:\n"
+      + bad_remote.stdout + bad_remote.stderr)
 e2e = subprocess.run(memo + ["note", "scoped memories land in the project"],
                      cwd=repo, capture_output=True, text=True,
                      env=dict(os.environ, XDG_DATA_HOME=xdg))
 check(e2e.returncode == 0 and "Saved as #0." in e2e.stdout,
       "a fresh checkout could not record its first memory: "
       + e2e.stdout + e2e.stderr)
-log = os.path.join(xdg, "optmem", "repo", "acme", "widget", "LOG.txt")
+identity = "github.com/acme/widget"
+project_store = os.path.join(
+    xdg, "optmem", "repo-v2",
+    "widget-" + cli._scope_key(identity))
+log = os.path.join(project_store, "LOG.txt")
 check(os.path.exists(log), "the project memory was not created at " + log)
 scope_file = os.path.join(os.path.dirname(log), "scope.json")
 with open(scope_file, encoding="utf-8") as f:
@@ -1787,15 +1986,29 @@ check("1 match" in r.stdout or "scoped memories" in r.stdout,
       "recall did not read the project memory: " + r.stdout + r.stderr)
 subprocess.run(["git", "-C", repo, "remote", "set-url", "origin",
                 "https://gitlab.com/acme/widget.git"], check=True)
-collision = subprocess.run(memo + ["doctor"], cwd=repo, capture_output=True,
-                           text=True, env=dict(os.environ, XDG_DATA_HOME=xdg))
-check(collision.returncode == 0 and "Scope identity: COLLISION" in
-      collision.stdout and "github.com/acme/widget" in collision.stdout
-      and "gitlab.com/acme/widget" in collision.stdout,
-      "doctor did not warn about a host collision:\n"
-      + collision.stdout + collision.stderr)
+separate = subprocess.run(memo + ["scope"], cwd=repo, capture_output=True,
+                          text=True, env=dict(os.environ, XDG_DATA_HOME=xdg))
+check(separate.returncode == 0
+      and "Project: gitlab.com/acme/widget" in separate.stdout
+      and project_store not in separate.stdout
+      and "[not created]" in separate.stdout,
+      "a second host did not receive a separate automatic scope:\n"
+      + separate.stdout + separate.stderr)
+subprocess.run(["git", "-C", repo, "remote", "set-url", "origin",
+                "git@github.com:acme/widget.git"], check=True)
+remembered = subprocess.run(memo + ["recall", "scoped"], cwd=repo,
+                            capture_output=True, text=True,
+                            env=dict(os.environ, XDG_DATA_HOME=xdg))
+check("scoped memories" in remembered.stdout,
+      "returning to the original host did not recover its memory:\n"
+      + remembered.stdout + remembered.stderr)
 
 shutil.rmtree(repo)
+shutil.rmtree(ambiguous_root)
+shutil.rmtree(path_moved)
+shutil.rmtree(race_project)
+shutil.rmtree(invalid_marker_project)
+shutil.rmtree(legacy_moved)
 shutil.rmtree(fake_release)
 shutil.rmtree(maintenance_home)
 shutil.rmtree(setup_dir)

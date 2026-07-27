@@ -6,25 +6,27 @@ older information. You do not need an agent plugin or hosted service.
 
 ## 1. Connect the instructions
 
-From the project the agent will work in, let OptMem safely add its managed
-block to both common instruction files:
+From the project the agent will work in, let OptMem add its managed CLI-use
+instructions to any existing common instruction files:
 
 ```sh
 cd /path/to/project
-memo setup --create
+memo setup
 ```
 
 On Windows PowerShell:
 
 ```powershell
 Set-Location C:\path\to\project
-memo setup --create
+memo setup
 ```
 
-The explicit `--create` permits missing `AGENTS.md` and `CLAUDE.md` files to
-be created. Without that flag, `setup` only updates existing files and reports
-each missing file it skipped. Use `--no-create` when a script should state
-that default explicitly.
+The managed block teaches the agent when to wake memory, what to save, how
+project and global scopes differ, and how to recall and compress memories.
+By default, `setup` only updates an existing `AGENTS.md` or `CLAUDE.md` and
+reports each missing file it skipped. Run `memo setup --create` to explicitly
+permit either missing file to be created. Use `--no-create` when a script
+should state the safe default explicitly.
 
 Existing files keep all of their content, with the OptMem block added at the
 top. Re-running the command changes nothing when the block is current and
@@ -41,6 +43,10 @@ Add `--create` if any explicit target does not exist yet.
 `setup` checks every requested file before writing any of them. It refuses
 malformed managed markers, non-UTF-8 files, directories, and symbolic links
 instead of guessing or partially configuring the project.
+
+Setup only manages the instruction files. It does not create a project memory
+or permanently bind the directory to one. OptMem detects scope whenever the
+agent later runs a command.
 
 For manual setup, run `memo init` and copy everything between:
 
@@ -64,19 +70,23 @@ contains the executable path that works on your platform.
 From the project where the agent will work:
 
 ```sh
+memo scope
 memo doctor
 ```
 
 Check that:
 
+- `scope` reports the expected `Project`, `Store`, and `Source`;
 - `Active scope` says `project`;
-- `Git origin` identifies the expected repository, or explains the path
-  fallback;
+- `Git remote` identifies the expected repository when one is selected;
 - `Global store` exists;
 - `Project store` points where you expect;
 - FFF is either available or clearly marked optional.
 
-`doctor` is read-only. It does not create stores or write memories.
+Both commands are read-only. They do not create stores, identity markers, or
+memories. Hosted projects use their full remote identity. Without a usable
+remote, the first memory use creates a stable marker inside `.git` or, outside
+Git, `.optmem-scope`, so moving the project does not change its memory.
 
 ## 3. Start the first session
 

@@ -4,20 +4,17 @@
 Usage:
   {memo} [--global] <command> [arguments]
 
-Start here:
-  {memo} version                 print the installed OptMem version
-  {memo} init                    create global memory; print agent instructions
+Connect and inspect:
+  {memo} init                    create global memory and print instructions
   {memo} setup [--create|--no-create] [FILE ...]
-                                 update AGENTS.md and CLAUDE.md safely
-  {memo} completion <shell>      print bash, zsh, fish, or powershell setup
-  {memo} upgrade                 download and validate the latest release
-  {memo} uninstall               remove the tool; preserve every memory
+                                 add CLI guidance to existing agent files
+  {memo} scope                   show automatic project and store selection
   {memo} doctor [--deep]         diagnose setup; optionally verify full stores
-  {memo} qmd [help]              explain or manage optional semantic recall
-  {memo} wake [part [T]]         read global then project memory
+  {memo} wake                    read global then project memory
+  {memo} wake <part> [T]         continue a paginated project-memory snapshot
 
 Remember and retrieve:
-  {memo} note "<one line>"       save to this project's memory
+  {memo} note "<one line>"       save one durable project memory
   {memo} show <id>               show one raw memory and later references
   {memo} amend <id> "<one line>" append a corrected replacement
   {memo} retract <id> "<reason>" mark a memory no longer authoritative
@@ -37,12 +34,28 @@ Maintain:
   {memo} import [--dry-run] <file>
                                  restore into an empty store
 
-Scope:
-  Commands use the project in the current directory. Put --global before a
-  command to use the memory that follows you everywhere. A bare wake reads
-  both, global first. MEMORY_DIR pins every command to one explicit store.
+Optional integrations and installation:
+  {memo} qmd [help]              explain or manage optional semantic recall
+  {memo} completion <shell>      print bash, zsh, fish, or powershell setup
+  {memo} version                 print the installed OptMem version
+  {memo} upgrade                 download and validate the latest release
+  {memo} uninstall               remove the tool; preserve every memory
 
-Run `{memo} doctor` when setup or scope is unclear.
+Scope precedence:
+  MEMORY_DIR pins one explicit store. Otherwise --global selects the memory
+  that follows you everywhere. Project commands automatically select a hosted
+  Git remote (origin, tracked, or sole); OPTMEM_REMOTE chooses when needed.
+  Without one, first memory use creates a move-stable local project marker.
+
+Examples:
+  {memo} setup                   teach existing AGENTS.md/CLAUDE.md to use memo
+  {memo} setup --create          also create either file when missing
+  {memo} scope                   preview selection without creating a store
+  {memo} note "Retries use capped exponential backoff."
+  {memo} --global note "The user prefers PowerShell examples."
+
+Run `{memo} scope` when project selection is unclear; run `{memo} doctor` for
+installation or store diagnostics.
 See github.com/doeixd/OptMem.
 """
 
@@ -96,7 +109,7 @@ ME = TOOL
 
 # The memory that follows you everywhere, as opposed to the one per project.
 GLOBAL = "~/.optmem/memory"
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 INSTALL_BASE = "https://github.com/doeixd/OptMem/releases/latest/download"
 SCOPE_GLOBAL = False  # set by main() from `--global`
 
@@ -209,7 +222,7 @@ def git(*args):
 
 
 def canonical_origin(url):
-    """A host-aware repository identity, independent of transport syntax."""
+    """A full host/namespace/repository identity, independent of transport."""
     value = url.strip()
     if not value:
         return ""
@@ -235,9 +248,9 @@ def canonical_origin(url):
              if part]
     if parts:
         parts[-1] = re.sub(r"\.git/*$", "", parts[-1])
-    if len(parts) < 2:
+    if not parts:
         return ""
-    return host + "/" + "/".join(parts[-2:])
+    return host + "/" + "/".join(parts)
 
 
 def safe_origin_alias(url):
@@ -280,23 +293,359 @@ def _read_scope_identity(d):
     return value
 
 
-def _record_scope_identity(d):
-    """Claim a legacy owner/repo store for one host identity on first use.
+def _scope_root():
+    data = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    return os.path.join(data, "optmem")
 
-    A different host deliberately does not rewrite the claim. `doctor` then
-    exposes the collision while leaving the user's existing store untouched.
-    """
+
+def _scope_key(identity):
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+
+
+def _scope_label(value):
+    """A short readable path component; the hash supplies actual identity."""
+    label = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip(" .-_")
+    if not label:
+        label = "project"
+    if label.upper() in {
+            "CON", "PRN", "AUX", "NUL",
+            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+            "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7",
+            "LPT8", "LPT9"}:
+        label = "_" + label
+    return label[:48]
+
+
+def _legacy_remote_dir(root, url, canonical):
+    safe = canonical or safe_origin_alias(url)
+    parts = re.split(r"[:/]", re.sub(r"\.git/*$", "", safe).rstrip("/"))
+    return os.path.join(root, "repo", *parts[-2:])
+
+
+def _legacy_path_dir(root, project):
+    drive, tail = os.path.splitdrive(os.path.abspath(project))
+    parts = [part for part in re.split(r"[\\/]+", tail) if part]
+    if drive:
+        parts.insert(0, drive.rstrip(":"))
+    return os.path.join(root, "path", *parts)
+
+
+def _stored_identity_matches(stored, identity):
+    """Match current identities and safely upgrade old truncated identities."""
+    if stored is None:
+        return False
+    if stored["canonical"] == identity:
+        return True
+    return any(canonical_origin(alias) == identity for alias in stored["aliases"])
+
+
+def _scope_map_path():
+    return os.path.join(_scope_root(), "scope-map.json")
+
+
+def _read_scope_map():
+    path = _scope_map_path()
+    if not os.path.isfile(path) or os.path.islink(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as source:
+            value = json.load(source)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    links = value.get("links")
+    if value.get("version") != 1 or not isinstance(links, dict):
+        return {}
+    return {key: target for key, target in links.items()
+            if isinstance(key, str) and isinstance(target, str)}
+
+
+def _linked_scope_dir(identity):
+    """Resolve a central path-scope link without permitting path traversal."""
+    relative = _read_scope_map().get(identity)
+    if not relative or os.path.isabs(relative):
+        return ""
+    root = os.path.abspath(_scope_root())
+    target = os.path.abspath(os.path.join(root, relative))
+    try:
+        inside = (os.path.commonpath((root, target)) == root and
+                  os.path.commonpath((os.path.realpath(root),
+                                      os.path.realpath(target))) ==
+                  os.path.realpath(root))
+    except ValueError:
+        inside = False
+    return target if (inside and not os.path.islink(target)
+                      and os.path.isdir(target)) else ""
+
+
+def _remote_selection():
+    """Select a usable Git remote without guessing among ambiguous choices."""
+    explicit = os.environ.get("OPTMEM_REMOTE")
+    if explicit:
+        names = [name for name in git("remote").splitlines() if name]
+        if explicit not in names:
+            die("OPTMEM_REMOTE names '%s', but this checkout has: %s."
+                % (explicit, ", ".join(names) if names else "no remotes"))
+        url = git("remote", "get-url", explicit)
+        canonical = canonical_origin(url)
+        if not canonical:
+            die("Git remote '%s' has no usable hosted repository URL: %s."
+                % (explicit, safe_origin_alias(url)))
+        return explicit, url, canonical, "OPTMEM_REMOTE"
+
+    origin_url = git("remote", "get-url", "origin")
+    origin_canonical = canonical_origin(origin_url)
+    if origin_canonical:
+        return ("origin", origin_url, origin_canonical,
+                "Git remote 'origin'")
+
+    names = [name for name in git("remote").splitlines() if name]
+    usable = {}
+    for name in names:
+        if name == "origin":
+            continue
+        url = git("remote", "get-url", name)
+        canonical = canonical_origin(url)
+        if canonical:
+            usable[name] = (url, canonical)
+
+    upstream = git("rev-parse", "--abbrev-ref", "--symbolic-full-name",
+                   "@{upstream}")
+    tracked = [name for name in usable if upstream.startswith(name + "/")]
+    if tracked:
+        name = max(tracked, key=len)
+        url, canonical = usable[name]
+        return name, url, canonical, "tracked Git remote '%s'" % name
+    if len(usable) == 1:
+        name = next(iter(usable))
+        url, canonical = usable[name]
+        return name, url, canonical, "only usable Git remote '%s'" % name
+    return None, "", "", (
+        "Git checkout path (ambiguous remotes: %s; set OPTMEM_REMOTE)"
+        % ", ".join(sorted(usable)) if usable else
+        "Git checkout path (no usable hosted remote)")
+
+
+def _path_identity(project):
+    """A provisional identity before a durable project marker exists."""
+    path = os.path.realpath(os.path.abspath(project))
+    try:
+        stat = os.stat(path)
+    except OSError:
+        stat = None
+    if stat is not None and stat.st_ino:
+        return ("filesystem:%x:%x" % (stat.st_dev, stat.st_ino),
+                "filesystem identity (stable across same-filesystem moves)")
+    normalized = os.path.normcase(path)
+    return "path:" + normalized, "absolute path (filesystem IDs unavailable)"
+
+
+def _scope_marker_path(project, checkout):
+    """Keep Git markers inside .git; use one hidden file outside Git."""
+    root_marker = os.path.join(os.path.abspath(project), ".optmem-scope")
+    if os.path.lexists(root_marker):
+        return root_marker
+    if checkout:
+        common = git("rev-parse", "--git-common-dir")
+        if common:
+            return os.path.join(os.path.abspath(common), "optmem-scope")
+    return root_marker
+
+
+def _read_scope_marker(path):
+    if not os.path.isfile(path) or os.path.islink(path):
+        return ""
+    try:
+        with open(path, encoding="ascii") as source:
+            value = source.read(128).strip()
+    except (OSError, UnicodeError):
+        return ""
+    match = re.fullmatch(r"optmem-scope-v1 ([0-9a-f]{32})", value)
+    return "marker:" + match.group(1) if match else ""
+
+
+def _scope_link_relative(d):
+    """A safe store path relative to the OptMem data root, or empty."""
+    root = os.path.abspath(_scope_root())
+    target = os.path.abspath(d)
+    try:
+        relative = os.path.relpath(target, root)
+        inside = (os.path.commonpath((root, target)) == root and
+                  os.path.commonpath((os.path.realpath(root),
+                                      os.path.realpath(target))) ==
+                  os.path.realpath(root))
+    except ValueError:
+        return ""
+    if (not inside or os.path.islink(target) or relative == os.pardir or
+            relative.startswith(os.pardir + os.sep)):
+        return ""
+    return relative
+
+
+def _write_scope_link_unlocked(identity, relative):
+    """Update scope-map.json while the caller holds the data-root lock."""
+    links = _read_scope_map()
+    if links.get(identity) == relative:
+        return
+    links[identity] = relative
+    encoded = (json.dumps({"version": 1, "links": links},
+                          indent=2, sort_keys=True) + "\n").encode("utf-8")
+    _atomic_replace(_scope_map_path(), encoded,
+                    os.path.exists(_scope_map_path()))
+
+
+def _ensure_scope_marker(info):
+    """Atomically reserve a marker and its store during first memory use."""
+    if info["kind"] != "path" or info.get("marker_identity"):
+        return info
+    path = info["marker_path"]
+    root = _scope_root()
+    os.makedirs(root, exist_ok=True)
+    lock = locked(root)
+    try:
+        identity = _read_scope_marker(path)
+        if not identity and os.path.lexists(path):
+            die("Path-scope marker is invalid or unsafe: %s.\n"
+                "Expected: optmem-scope-v1 followed by 32 lowercase hex digits."
+                % pretty(path))
+        if not identity:
+            identity = "marker:" + os.urandom(16).hex()
+            encoded = ("optmem-scope-v1 %s\n" %
+                       identity.split(":", 1)[1]).encode("ascii")
+            _atomic_replace(path, encoded, False)
+        # Publish the link before another process can observe the marker.
+        # The empty directory is a reservation; LOG.txt remains untouched
+        # until store() completes normal validation and initialization.
+        if os.path.lexists(info["store"]) and os.path.islink(info["store"]):
+            die("Refusing symbolic-link project store at %s."
+                % pretty(info["store"]))
+        os.makedirs(info["store"], exist_ok=True)
+        relative = _scope_link_relative(info["store"])
+        if not relative:
+            die("Refusing project store outside OptMem data root: %s."
+                % pretty(info["store"]))
+        _write_scope_link_unlocked(identity, relative)
+    finally:
+        lock.close()
+    updated = dict(info)
+    updated["identity"] = identity
+    updated["marker_identity"] = identity
+    updated["source"] = (
+        ("Git checkout marker" if info["checkout"] else
+         "project marker") + " (stable across directory and filesystem moves)")
+    return updated
+
+
+def project_scope():
+    """Describe automatic project selection without creating or changing it."""
+    root = _scope_root()
+    checkout = git("rev-parse", "--show-toplevel")
+    remote_name, remote_url, canonical, source = _remote_selection()
+    warning = None
+    if canonical:
+        identity = canonical
+        label = canonical.rsplit("/", 1)[-1]
+        preferred = os.path.join(
+            root, "repo-v2", "%s-%s" % (_scope_label(label),
+                                        _scope_key(identity)))
+        legacy = _legacy_remote_dir(root, remote_url, canonical)
+        stored = _read_scope_identity(legacy) if os.path.isdir(legacy) else None
+        legacy_compatible = (
+            os.path.isdir(legacy) and (
+                (stored is None and
+                 not os.path.lexists(_scope_identity_path(legacy))) or
+                _stored_identity_matches(stored, identity)))
+        if os.path.isdir(preferred):
+            selected, layout = preferred, "canonical"
+        elif legacy_compatible:
+            selected, layout = legacy, "legacy-compatible"
+        else:
+            selected, layout = preferred, "canonical"
+            if os.path.isdir(legacy):
+                owner = (stored["canonical"] if stored is not None else
+                         "an unreadable identity")
+                warning = ("Legacy store %s belongs to %s; using an isolated "
+                           "store for %s." % (pretty(legacy), owner, identity))
+        return {
+            "kind": "remote", "project": identity, "identity": identity,
+            "alias": safe_origin_alias(remote_url), "source": source,
+            "remote_name": remote_name, "remote_url": remote_url,
+            "checkout": checkout or os.getcwd(), "store": selected,
+            "preferred": preferred, "legacy": legacy, "layout": layout,
+            "warning": warning,
+        }
+
+    project = checkout or os.getcwd()
+    if not checkout:
+        source = "current directory (outside Git)"
+    marker_path = _scope_marker_path(project, checkout)
+    marker_identity = _read_scope_marker(marker_path)
+    if os.path.lexists(marker_path) and not marker_identity:
+        warning = ("Path-scope marker is invalid or unsafe: %s"
+                   % pretty(marker_path))
+    if marker_identity:
+        identity = marker_identity
+        identity_source = (
+            "Git checkout marker" if checkout else "project marker")
+        identity_source += " (stable across directory and filesystem moves)"
+    else:
+        identity, identity_source = _path_identity(project)
+        identity_source += "; provisional until first memory use"
+    label = os.path.basename(os.path.normpath(project)) or "project"
+    preferred = os.path.join(
+        root, "path-v2", "%s-%s" % (_scope_label(label), _scope_key(identity)))
+    legacy = _legacy_path_dir(root, project)
+    linked = _linked_scope_dir(identity)
+    if linked:
+        selected, layout = linked, "linked path"
+    elif os.path.isdir(preferred):
+        selected, layout = preferred, "filesystem identity"
+    elif os.path.isdir(legacy):
+        selected, layout = legacy, "legacy-compatible path"
+    else:
+        selected, layout = preferred, "filesystem identity"
+    return {
+        "kind": "path", "project": os.path.abspath(project),
+        "identity": identity, "alias": os.path.abspath(project),
+        "source": source + "; " + identity_source,
+        "remote_name": None, "remote_url": "", "checkout": checkout,
+        "store": selected, "preferred": preferred, "legacy": legacy,
+        "layout": layout, "warning": warning, "marker_path": marker_path,
+        "marker_identity": marker_identity,
+    }
+
+
+def _record_scope_link(info, d):
+    """Remember where a legacy path store lives so directory moves retain it."""
+    if info["kind"] != "path":
+        return
+    relative = _scope_link_relative(d)
+    if not relative:
+        return
+    root = _scope_root()
+    os.makedirs(root, exist_ok=True)
+    lock = locked(root)
+    try:
+        _write_scope_link_unlocked(info["identity"], relative)
+    finally:
+        lock.close()
+
+
+def _record_scope_identity(d, info=None):
+    """Record or safely upgrade the identity claimed by a project store."""
     if SCOPE_GLOBAL or os.environ.get("MEMORY_DIR"):
         return
-    raw = git("remote", "get-url", "origin")
-    canonical = canonical_origin(raw)
-    alias = safe_origin_alias(raw)
-    if not canonical:
-        return
+    info = info or project_scope()
+    canonical = info["identity"]
+    alias = info["alias"]
     identity_path = _scope_identity_path(d)
     current = _read_scope_identity(d)
     if current is not None:
-        if current["canonical"] != canonical or alias in current["aliases"]:
+        if not _stored_identity_matches(current, canonical):
+            return
+        if current["canonical"] == canonical and alias in current["aliases"]:
+            _record_scope_link(info, d)
             return
     if current is None and os.path.lexists(identity_path):
         return
@@ -310,35 +659,20 @@ def _record_scope_identity(d):
                 "aliases": [alias],
             }, indent=2, sort_keys=True) + "\n").encode("utf-8")
             _atomic_replace(identity_path, encoded, False)
-        elif (current is not None and current["canonical"] == canonical and
-              alias not in current["aliases"]):
-            current["aliases"].append(alias)
+        elif current is not None and _stored_identity_matches(current, canonical):
+            current["canonical"] = canonical
+            if alias not in current["aliases"]:
+                current["aliases"].append(alias)
             encoded = (json.dumps(
                 current, indent=2, sort_keys=True) + "\n").encode("utf-8")
             _atomic_replace(identity_path, encoded, True)
     finally:
         lock.close()
+    _record_scope_link(info, d)
 
 
 def scope_dir():
-    """The memory of the project in $PWD. Keyed by the origin remote, reduced
-    to owner/repo: every worktree and every host alias for one repo is one
-    project. No remote falls back to the checkout, no checkout to $PWD."""
-    root = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
-    url = git("remote", "get-url", "origin")
-    if url:
-        canonical = canonical_origin(url)
-        safe = canonical or safe_origin_alias(url)
-        parts = re.split(r"[:/]", re.sub(r"\.git/*$", "", safe).rstrip("/"))
-        slug = os.path.join("repo", *parts[-2:])
-    else:
-        project = git("rev-parse", "--show-toplevel") or os.getcwd()
-        drive, tail = os.path.splitdrive(os.path.abspath(project))
-        parts = [p for p in re.split(r"[\\/]+", tail) if p]
-        if drive:
-            parts.insert(0, drive.rstrip(":"))
-        slug = os.path.join("path", *parts)
-    return os.path.join(root, "optmem", slug)
+    return project_scope()["store"]
 
 
 def memory_dir():
@@ -350,7 +684,14 @@ def memory_dir():
 
 
 def store():
-    d = memory_dir()
+    info = None
+    if not os.environ.get("MEMORY_DIR") and not SCOPE_GLOBAL:
+        info = project_scope()
+        if info["kind"] == "path":
+            info = _ensure_scope_marker(info)
+        d = info["store"]
+    else:
+        d = memory_dir()
     # A named memory is only ever created by `memo init`: creating it IS
     # creating the identity, and that is a deliberate act. If any other
     # command created it, a typo in MEMORY_DIR would silently open an empty
@@ -371,7 +712,7 @@ def store():
         die("Refusing symbolic-link LOG.txt at %s." % pretty(p))
     if not os.path.exists(p):
         open(p, "a").close()
-    _record_scope_identity(d)
+    _record_scope_identity(d, info)
     return d
 
 
@@ -950,6 +1291,8 @@ with coarser summaries for older history and finer detail toward the present.
 Run `{memo} wake` before any other tool call, in every session, and
 then do exactly what it prints, to the end of its output. It reads the
 global memory first, then the memory of the project you are in.
+If the selected project is ever unclear, `{memo} scope` reports the identity,
+store, and detection source without changing memory.
 
 ### While working: register memories (mandatory)
 
@@ -1038,7 +1381,7 @@ _memo_completion() {
     done
 
     if [ -z "$cmd" ]; then
-        _memo_compgen -W "--global version init setup completion upgrade uninstall doctor qmd wake note show amend retract recall zoom nap resummarize forget redact config export import" -- "$cur"
+        _memo_compgen -W "--global version init setup completion upgrade uninstall scope doctor qmd wake note show amend retract recall zoom nap resummarize forget redact config export import" -- "$cur"
         return
     fi
     case "$cmd" in
@@ -1112,6 +1455,7 @@ _memo() {
         'completion:print a shell completion script'
         'upgrade:download and validate the latest release'
         'uninstall:remove the tool while preserving memories'
+        'scope:show automatic project and store selection'
         'doctor:diagnose installation and memory scope'
         'qmd:manage optional QMD semantic recall'
         'wake:read global then project memory'
@@ -1200,10 +1544,11 @@ end
 complete -c memo -n __memo_needs_command -l global -d 'Use global memory'
 complete -c memo -n __memo_needs_command -a version -d 'Print the installed OptMem version'
 complete -c memo -n __memo_needs_command -a init -d 'Create global memory and print instructions'
-complete -c memo -n __memo_needs_command -a setup -d 'Add or update agent instruction files'
+complete -c memo -n __memo_needs_command -a setup -d 'Teach agents to use the memo CLI'
 complete -c memo -n __memo_needs_command -a completion -d 'Print a shell completion script'
 complete -c memo -n __memo_needs_command -a upgrade -d 'Download and validate the latest release'
 complete -c memo -n __memo_needs_command -a uninstall -d 'Remove the tool while preserving memories'
+complete -c memo -n __memo_needs_command -a scope -d 'Show automatic project and store selection'
 complete -c memo -n __memo_needs_command -a doctor -d 'Diagnose installation and memory scope'
 complete -c memo -n __memo_needs_command -a qmd -d 'Manage optional QMD semantic recall'
 complete -c memo -n __memo_needs_command -a wake -d 'Read global then project memory'
@@ -1246,10 +1591,11 @@ Register-ArgumentCompleter -Native -CommandName memo -ScriptBlock {
     $commands = [ordered]@{
         version    = 'Print the installed OptMem version'
         init       = 'Create global memory and print agent instructions'
-        setup      = 'Add or update agent instruction files'
+        setup      = 'Teach agents to use the memo CLI'
         completion = 'Print a shell completion script'
         upgrade    = 'Download and validate the latest release'
         uninstall  = 'Remove the tool while preserving memories'
+        scope      = 'Show automatic project and store selection'
         doctor     = 'Diagnose installation and memory scope'
         qmd        = 'Manage optional QMD semantic recall'
         wake       = 'Read global then project memory'
@@ -1756,7 +2102,9 @@ def cmd_init(d, args):
     print("Configuration: %s" % pretty(os.path.join(d, "config")))
     print()
     print("Connect your agent:")
-    print("  Automatic: run %s setup in your project." % TOOL)
+    print("  Automatic: run %s setup in your project to add managed CLI-use" %
+          TOOL)
+    print("  guidance to each existing AGENTS.md or CLAUDE.md.")
     print("  Add --create if AGENTS.md or CLAUDE.md does not exist yet.")
     print("  Manual: copy everything between the BEGIN and END markers into")
     print("  AGENTS.md, CLAUDE.md, or your agent's persistent instruction file.")
@@ -1768,6 +2116,7 @@ def cmd_init(d, args):
     print(agent_block(d))
     print("----- END OPTMEM AGENT INSTRUCTIONS -----")
     print()
+    print("Inspect automatic project selection with: %s scope" % TOOL)
     print("Verify this installation any time with: %s doctor" % TOOL)
 
 
@@ -2237,11 +2586,9 @@ def _qmd_context(d):
     if os.environ.get("MEMORY_DIR"):
         return ("Explicit OptMem memory: durable decisions, constraints, "
                 "preferences, and facts stored in this selected scope.")
-    origin = git("remote", "get-url", "origin")
-    if origin:
-        safe = canonical_origin(origin) or safe_origin_alias(origin)
-        parts = re.split(r"[:/]", re.sub(r"\.git/*$", "", safe).rstrip("/"))
-        label = "/".join(parts[-2:])
+    scope = project_scope()
+    if scope["kind"] == "remote":
+        label = scope["project"]
         return ("Project OptMem memory for repository %s: architecture "
                 "decisions, commands, failed approaches, and "
                 "repository-specific facts." % label)
@@ -3136,21 +3483,53 @@ def memory_status(d):
     return plural(size // LOG_REC, "memory")
 
 
+def cmd_scope(d, args):
+    """Explain scope selection without creating or modifying any store."""
+    if args:
+        die("usage: %s scope" % ME)
+    print("OptMem scope")
+    override = os.environ.get("MEMORY_DIR")
+    if override:
+        print("  Project: explicit memory")
+        print("  Store:   %s [%s]" % (pretty(d), memory_status(d)))
+        print("  Source:  MEMORY_DIR")
+        print("  Scope:   explicit override; project/global detection is bypassed")
+        return
+    if SCOPE_GLOBAL:
+        print("  Project: global memory")
+        print("  Store:   %s [%s]" % (pretty(d), memory_status(d)))
+        print("  Source:  --global")
+        print("  Scope:   information intended to follow the user across projects")
+        return
+
+    info = project_scope()
+    print("  Project: %s" % info["project"])
+    print("  Store:   %s [%s]" %
+          (pretty(info["store"]), memory_status(info["store"])))
+    print("  Source:  %s" % info["source"])
+    if info["remote_name"]:
+        print("  Remote:  %s = %s" %
+              (info["remote_name"], safe_origin_alias(info["remote_url"])))
+    print("  Layout:  %s" % info["layout"])
+    if info["kind"] == "path":
+        print("  Identity: %s" % info["identity"])
+    if info["warning"]:
+        print("  Warning: %s" % info["warning"])
+
+
 def _scope_identity_status(d):
     if SCOPE_GLOBAL or os.environ.get("MEMORY_DIR"):
         return "not applicable", None
-    raw = git("remote", "get-url", "origin")
-    current = canonical_origin(raw)
+    info = project_scope()
+    current = info["identity"]
     stored = _read_scope_identity(d)
-    if not current:
-        return "checkout path (no canonical remote)", None
     if not os.path.isdir(d):
         return "not recorded (store not created)", None
     if stored is None and os.path.lexists(_scope_identity_path(d)):
         return "INVALID", "scope.json is malformed or unsafe"
     if stored is None:
         return "unrecorded legacy store", None
-    if stored["canonical"] != current:
+    if not _stored_identity_matches(stored, current):
         warning = ("store belongs to %s, but this checkout is %s"
                    % (stored["canonical"], current))
         return "COLLISION", warning
@@ -3292,7 +3671,8 @@ def cmd_doctor(d, args):
     deep = args == ["--deep"]
     if args and not deep:
         die("usage: %s doctor [--deep]" % ME)
-    project = scope_dir()
+    project_info = project_scope()
+    project = project_info["store"]
     global_ = os.path.expanduser(GLOBAL)
     override = os.environ.get("MEMORY_DIR")
     if override:
@@ -3312,16 +3692,19 @@ def cmd_doctor(d, args):
         else:
             fff_status = "not installed (optional: python -m pip install fff-search)"
 
-    origin_raw = git("remote", "get-url", "origin")
-    origin = (safe_origin_alias(origin_raw) if origin_raw else
-              "none; using checkout path")
+    remote = (
+        "%s = %s" % (project_info["remote_name"],
+                     safe_origin_alias(project_info["remote_url"]))
+        if project_info["remote_name"] else "none")
     on_path = bool(shutil.which("memo") or shutil.which("memo.cmd"))
     print("OptMem doctor")
     print("  Version:       %s" % VERSION)
     print("  Tool:          %s" % pretty(__file__))
     print("  Python:        %s" % sys.version.split()[0])
     print("  On PATH:       %s (optional)" % ("yes" if on_path else "no"))
-    print("  Git origin:    %s" % origin)
+    print("  Git remote:    %s" % remote)
+    print("  Scope source:  %s" % project_info["source"])
+    print("  Scope layout:  %s" % project_info["layout"])
     print("  Active scope:  %s" % scope)
     print("  Active store:  %s [%s]" % (pretty(d), memory_status(d)))
     print("  Project store: %s [%s]" % (pretty(project), memory_status(project)))
@@ -3341,7 +3724,8 @@ def cmd_doctor(d, args):
     print("  Scope identity: %s" % identity)
     if collision:
         print("  WARNING:        %s" % collision)
-        print("                  These repositories share the legacy owner/repo path.")
+    if project_info["warning"]:
+        print("  WARNING:        %s" % project_info["warning"])
     if deep:
         errors, warnings, records_, summaries = _verify_store(d)
         print()
@@ -3370,7 +3754,8 @@ def cmd_doctor(d, args):
 
 COMMANDS = {"version": cmd_version, "init": cmd_init, "setup": cmd_setup,
             "completion": cmd_completion, "upgrade": cmd_upgrade,
-            "uninstall": cmd_uninstall, "qmd": cmd_qmd, "wake": cmd_wake,
+            "uninstall": cmd_uninstall, "scope": cmd_scope,
+            "qmd": cmd_qmd, "wake": cmd_wake,
             "note": cmd_note, "show": cmd_show, "amend": cmd_amend,
             "retract": cmd_retract, "redact": cmd_redact,
             "nap": cmd_nap, "recall": cmd_recall, "zoom": cmd_zoom,
@@ -3431,6 +3816,9 @@ def main():
             return
         if cmd == "uninstall":
             cmd_uninstall(None, argv[1:])
+            return
+        if cmd == "scope":
+            cmd_scope(memory_dir(), argv[1:])
             return
         if cmd == "qmd":
             qmd_args = argv[1:]
