@@ -196,7 +196,9 @@ for shell, signature in completion_signatures.items():
           "%s completion omits maintenance commands" % shell)
     check("limit" in completed.stdout and "context" in completed.stdout
           and "depth" in completed.stdout and "semantic" in completed.stdout
-          and "qmd" in completed.stdout and "purge" in completed.stdout,
+          and "fast" in completed.stdout and "qmd" in completed.stdout
+          and "sync" in completed.stdout and "FALLBACK=on" in completed.stdout
+          and "purge" in completed.stdout,
           "%s completion omits recall/zoom controls" % shell)
 bad_completion = subprocess.run(memo + ["completion", "tcsh"],
                                 capture_output=True, text=True, env=fresh)
@@ -249,6 +251,28 @@ check(bad_qmd.returncode == 1 and "Run:" in bad_qmd.stderr
       and not os.path.exists(os.path.join(fresh["XDG_DATA_HOME"], "optmem")),
       "an invalid qmd command created a store or omitted help:\n"
       + bad_qmd.stdout + bad_qmd.stderr)
+fresh_qmd_config = subprocess.run(
+    memo + ["qmd", "config"], capture_output=True, text=True, env=fresh)
+check(fresh_qmd_config.returncode == 0
+      and "FALLBACK=off" in fresh_qmd_config.stdout
+      and not os.path.exists(os.path.join(fresh["XDG_DATA_HOME"], "optmem")),
+      "reading QMD fallback config created a project store:\n"
+      + fresh_qmd_config.stdout + fresh_qmd_config.stderr)
+fresh_qmd_fallback = subprocess.run(
+    memo + ["qmd", "config", "FALLBACK=on"],
+    capture_output=True, text=True, env=fresh)
+check(fresh_qmd_fallback.returncode == 1
+      and "requires an enabled integration" in fresh_qmd_fallback.stderr
+      and not os.path.exists(os.path.join(fresh["XDG_DATA_HOME"], "optmem")),
+      "enabling QMD fallback without QMD created a project store:\n"
+      + fresh_qmd_fallback.stdout + fresh_qmd_fallback.stderr)
+fresh_qmd_sync = subprocess.run(
+    memo + ["qmd", "sync"], capture_output=True, text=True, env=fresh)
+check(fresh_qmd_sync.returncode == 1
+      and "not enabled" in fresh_qmd_sync.stderr
+      and not os.path.exists(os.path.join(fresh["XDG_DATA_HOME"], "optmem")),
+      "syncing disabled QMD created a project store:\n"
+      + fresh_qmd_sync.stdout + fresh_qmd_sync.stderr)
 fresh_semantic = subprocess.run(
     memo + ["recall", "--semantic", "anything"], capture_output=True,
     text=True, env=fresh)
@@ -798,6 +822,10 @@ cli._qmd_run = fake_qmd_run
 enabled = run("qmd", "enable", store=qmd_store)
 check(enabled.returncode == 0 and "enabled" in enabled.stdout,
       "memo qmd enable failed: " + enabled.stdout + enabled.stderr)
+fallback_default = run("qmd", "config", store=qmd_store)
+check(fallback_default.returncode == 0 and "FALLBACK=off" in
+      fallback_default.stdout,
+      "QMD semantic fallback was not safely off by default")
 projection = os.path.join(qmd_store, "QMD")
 segments = sorted(name for name in os.listdir(projection)
                   if name.endswith(".md"))
@@ -852,6 +880,63 @@ check(semantic_again.returncode == 0 and called_commands.count("query") == 1
       and "update" not in called_commands and "embed" not in called_commands,
       "an unchanged projection was unnecessarily re-indexed: %r" % qmd_calls)
 
+run("note", "prepaid by the explicit QMD sync command", store=qmd_store)
+qmd_calls.clear()
+synced = run("qmd", "sync", store=qmd_store)
+called_commands = [call[0][0] for call in qmd_calls]
+check(synced.returncode == 0 and "current" in synced.stdout
+      and "update" in called_commands and "embed" in called_commands
+      and "query" not in called_commands,
+      "memo qmd sync did not prepay projection and embedding work:\n"
+      + synced.stdout + synced.stderr + repr(qmd_calls))
+qmd_calls.clear()
+verified_sync = run("qmd", "sync", store=qmd_store)
+check(verified_sync.returncode == 0
+      and any(call[0][0] == "update" for call in qmd_calls)
+      and any(call[0][0] == "embed" for call in qmd_calls),
+      "memo qmd sync did not verify QMD after an unchanged projection")
+
+qmd_calls.clear()
+fast_semantic = run("recall", "--semantic", "--fast", "policy",
+                    store=qmd_store)
+query_calls = [call[0] for call in qmd_calls if call[0][0] == "query"]
+check(fast_semantic.returncode == 0
+      and "fast, no reranking" in fast_semantic.stdout
+      and len(query_calls) == 1 and "--no-rerank" in query_calls[0]
+      and not any(call[0][0] in ("update", "embed") for call in qmd_calls),
+      "semantic --fast did not skip reranking or reuse explicit sync:\n"
+      + fast_semantic.stdout + fast_semantic.stderr + repr(qmd_calls))
+check(run("recall", "--fast", "policy", store=qmd_store).returncode == 1,
+      "recall accepted --fast without --semantic")
+
+fallback_on = run("qmd", "config", "FALLBACK=on", store=qmd_store)
+check(fallback_on.returncode == 0 and "FALLBACK=on" in fallback_on.stdout
+      and os.path.isfile(os.path.join(projection, "fallback")),
+      "memo qmd config did not enable per-scope fallback")
+qmd_calls.clear()
+exact_with_fallback = run("recall", "canonical memory 18", store=qmd_store)
+check(exact_with_fallback.returncode == 0 and not qmd_calls,
+      "configured fallback invoked QMD despite an exact result")
+saved_fff_recall = cli.fff_recall
+cli.fff_recall = lambda store, query, limit=None: ([], None)
+qmd_calls.clear()
+semantic_fallback = run(
+    "recall", "meaning that exact and fuzzy cannot find", store=qmd_store)
+cli.fff_recall = saved_fff_recall
+check(semantic_fallback.returncode == 0
+      and "Trying QMD semantic fallback" in semantic_fallback.stdout
+      and "Semantic matches in selected memory" in semantic_fallback.stdout
+      and any(call[0][0] == "query" for call in qmd_calls),
+      "configured zero-result recall did not escalate to QMD:\n"
+      + semantic_fallback.stdout + semantic_fallback.stderr + repr(qmd_calls))
+fallback_off = run("qmd", "config", "FALLBACK=off", store=qmd_store)
+check(fallback_off.returncode == 0 and "FALLBACK=off" in fallback_off.stdout
+      and not os.path.exists(os.path.join(projection, "fallback")),
+      "memo qmd config did not disable fallback")
+# Leave it on through disable: the cheap retained projection also retains the
+# preference, but it must remain inactive until QMD is enabled again.
+run("qmd", "config", "FALLBACK=on", store=qmd_store)
+
 run("note", "forces an interrupted QMD embedding retry", store=qmd_store)
 qmd_fail_embed[0] = True
 interrupted_sync = run("recall", "--semantic", "policy", store=qmd_store)
@@ -890,6 +975,23 @@ check(run("recall", "--semantic", "--limit", "2", "x",
           store=qmd_store).returncode == 1,
       "semantic recall silently accepted exact-recall controls")
 
+wake_qmd_store = tempfile.mkdtemp(prefix="optmem-qmd-wake-")
+os.makedirs(os.path.join(wake_qmd_store, "TREE"))
+open(os.path.join(wake_qmd_store, "LOG.txt"), "wb").close()
+cli.log_append(wake_qmd_store, [("2026-07-27", "one wake capability memory")])
+cli._qmd_mark(wake_qmd_store, "enabled")
+enabled_wake = run("wake", store=wake_qmd_store)
+check(enabled_wake.returncode == 0
+      and "Semantic recall is available:" in enabled_wake.stdout
+      and 'recall --semantic "<meaning>"' in enabled_wake.stdout,
+      "wake omitted the enabled semantic-recall capability:\n"
+      + enabled_wake.stdout + enabled_wake.stderr)
+os.unlink(os.path.join(wake_qmd_store, "QMD", "enabled"))
+disabled_wake = run("wake", store=wake_qmd_store)
+check("Semantic recall is available:" not in disabled_wake.stdout,
+      "wake advertised semantic recall while QMD was disabled")
+shutil.rmtree(wake_qmd_store)
+
 # Restoring an older backup removes impossible trailing segments and rewrites
 # only the now-current partial segment.
 with cli.locked(qmd_store):
@@ -923,6 +1025,7 @@ check(disabled_semantic.returncode == 1
       "semantic recall ran while QMD was disabled")
 qmd_status = run("qmd", "status", store=qmd_store)
 check(qmd_status.returncode == 0 and "Integration:     disabled" in
+      qmd_status.stdout and "Fallback:        on (inactive while disabled)" in
       qmd_status.stdout and "qmd 2.5.3" in qmd_status.stdout,
       "memo qmd status did not explain disabled retained state:\n"
       + qmd_status.stdout + qmd_status.stderr)

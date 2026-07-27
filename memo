@@ -656,7 +656,9 @@ directly. Add `--limit N` to cap matched entries and `--context N` to
 include neighboring raw memories; neither makes the search less complete.
 Recall and `zoom` read the project memory; put `--global` first for global.
 If QMD was explicitly enabled for this scope, use
-`{memo} recall --semantic "<meaning>"` for meaning-based raw-memory recall.
+`{memo} recall --semantic "<meaning>"` for meaning-based raw-memory recall;
+add `--fast` to skip reranking for repeated related searches. QMD can also be
+configured as the last fallback after exact and fuzzy recall both miss.
 
 A `#a-b` line from `wake` is one summary node covering raw memory IDs
 `a` through `b`. `{memo} zoom <a-b>` opens one level; add `--depth N`
@@ -709,13 +711,15 @@ _memo_completion() {
             _memo_compgen -W "bash zsh fish powershell" -- "$cur"
             ;;
         recall)
-            _memo_compgen -W "--fuzzy --semantic --limit --context" -- "$cur"
+            _memo_compgen -W "--fuzzy --semantic --fast --limit --context" -- "$cur"
             ;;
         qmd)
             if [[ " ${COMP_WORDS[*]} " == *" disable "* ]]; then
                 _memo_compgen -W "--purge" -- "$cur"
+            elif [[ " ${COMP_WORDS[*]} " == *" config "* ]]; then
+                _memo_compgen -W "FALLBACK=on FALLBACK=off" -- "$cur"
             else
-                _memo_compgen -W "enable status rebuild disable help" -- "$cur"
+                _memo_compgen -W "enable status sync rebuild config disable help" -- "$cur"
             fi
             ;;
         zoom)
@@ -774,6 +778,7 @@ _memo() {
         recall)
             _arguments '--fuzzy[use typo-tolerant FFF recall]' \
                 '--semantic[use optional QMD meaning-based recall]' \
+                '--fast[skip QMD reranking; requires --semantic]' \
                 '--limit=[maximum matching memories]:count:' \
                 '--context=[neighboring memories on each side]:count:' \
                 '*:query:'
@@ -781,8 +786,10 @@ _memo() {
         qmd)
             if (( ${words[(Ie)disable]} )); then
                 _arguments '--purge[remove the disposable projection]'
+            elif (( ${words[(Ie)config]} )); then
+                _values 'qmd setting' FALLBACK=on FALLBACK=off
             else
-                _values 'qmd command' enable status rebuild disable help
+                _values 'qmd command' enable status sync rebuild config disable help
             fi
             ;;
         zoom)
@@ -828,10 +835,12 @@ complete -c memo -n 'contains -- setup (commandline -opc)' -l no-create -d 'Skip
 complete -c memo -n 'contains -- completion (commandline -opc)' -a 'bash zsh fish powershell'
 complete -c memo -n 'contains -- recall (commandline -opc)' -l fuzzy -d 'Use typo-tolerant FFF recall'
 complete -c memo -n 'contains -- recall (commandline -opc)' -l semantic -d 'Use optional QMD meaning-based recall'
+complete -c memo -n 'contains -- recall (commandline -opc)' -l fast -d 'Skip QMD reranking'
 complete -c memo -n 'contains -- recall (commandline -opc)' -l limit -r -d 'Maximum matching memories'
 complete -c memo -n 'contains -- recall (commandline -opc)' -l context -r -d 'Neighboring memories on each side'
 complete -c memo -n 'contains -- zoom (commandline -opc)' -l depth -r -d 'Tree levels to open'
-complete -c memo -n 'contains -- qmd (commandline -opc)' -a 'enable status rebuild disable help'
+complete -c memo -n 'contains -- qmd (commandline -opc)' -a 'enable status sync rebuild config disable help'
+complete -c memo -n 'contains -- qmd (commandline -opc); and contains -- config (commandline -opc)' -a 'FALLBACK=on FALLBACK=off'
 complete -c memo -n 'contains -- qmd (commandline -opc); and contains -- disable (commandline -opc)' -l purge -d 'Remove the disposable projection'
 complete -c memo -n 'contains -- config (commandline -opc)' -a 'WAKE_LINES= ENTRY_CHARS= PART_CHARS= PART_LINES='""",
     "powershell": r"""# PowerShell completion for memo
@@ -867,12 +876,14 @@ Register-ArgumentCompleter -Native -CommandName memo -ScriptBlock {
         $candidates = switch ($command) {
             setup      { '--create', '--no-create' }
             completion { 'bash', 'zsh', 'fish', 'powershell' }
-            recall     { '--fuzzy', '--semantic', '--limit', '--context' }
+            recall     { '--fuzzy', '--semantic', '--fast', '--limit', '--context' }
             qmd        {
                 if ($tokens -contains 'disable') {
                     '--purge'
+                } elseif ($tokens -contains 'config') {
+                    'FALLBACK=on', 'FALLBACK=off'
                 } else {
-                    'enable', 'status', 'rebuild', 'disable', 'help'
+                    'enable', 'status', 'sync', 'rebuild', 'config', 'disable', 'help'
                 }
             }
             zoom       { '--depth' }
@@ -1378,6 +1389,9 @@ def cmd_wake(d, args, tail=True, continuation=None):
     if not T:
         print("No memories yet. Record the first with: %s note \"<one line>\""
               % ME)
+        if qmd_enabled(d):
+            print('Semantic recall is available: %s recall --semantic "<meaning>"'
+                  % ME)
         if tail:
             print("You are awake.")
         return True
@@ -1428,6 +1442,9 @@ def cmd_wake(d, args, tail=True, continuation=None):
     else:
         # always, even for a one-part memory: the contract an agent is given
         # is "run parts until one says awake", so it must always arrive
+        if qmd_enabled(d):
+            print('Semantic recall is available: %s recall --semantic "<meaning>"'
+                  % ME)
         if tail:
             print("You are awake.")
         nap = next_nap(d, T)
@@ -1593,6 +1610,14 @@ def qmd_enabled(d):
         return False
 
 
+def qmd_fallback(d):
+    """Whether ordinary zero-result recall may escalate to semantic recall."""
+    try:
+        return os.path.isfile(_qmd_file(d, "fallback"))
+    except QmdError:
+        return False
+
+
 def _qmd_write(path, data):
     if os.path.isdir(path):
         raise QmdError("projection path is a directory: %s" % pretty(path))
@@ -1745,12 +1770,13 @@ def _qmd_ensure_collection(d, context=True):
     return created
 
 
-def _qmd_index_projection(d):
-    """Bring QMD up to date, retrying after any interrupted prior attempt."""
+def _qmd_index_projection(d, verify=False):
+    """Bring QMD up to date, retrying after any interrupted prior attempt.
+    Explicit sync also asks QMD to verify hashes and pending embeddings."""
     changed, T, segments = _qmd_sync_projection(d)
     created = _qmd_ensure_collection(d)
     dirty = os.path.isfile(_qmd_file(d, "dirty"))
-    if changed or created or dirty:
+    if changed or created or dirty or verify:
         _qmd_run(["update"], timeout=300)
         _qmd_run(["embed", "-c", qmd_collection(d)], timeout=1800)
         try:
@@ -1842,6 +1868,7 @@ def _qmd_status(d, probe=True):
     return {
         "executable": executable,
         "enabled": enabled,
+        "fallback": qmd_fallback(d),
         "projection": projection,
         "collection": collection,
         "embeddings": embeddings,
@@ -1857,17 +1884,23 @@ def cmd_qmd(d, args):
 Usage:
   %s qmd enable             enable the integration; indexing stays lazy
   %s qmd status             inspect the executable and derived index state
+  %s qmd sync               update the projection, index, and embeddings now
   %s qmd rebuild            recreate the projection, collection, and embeddings
+  %s qmd config [FALLBACK=on|off]
+      Opt into semantic fallback after exact/FFF misses.
   %s qmd disable            unregister QMD but keep the disposable projection
   %s qmd disable --purge    also remove the disposable projection
 
 Recall by meaning with:
   %s recall --semantic "<meaning>"
+  %s recall --semantic --fast "<meaning>"   skip reranking
 
-LOG.txt remains authoritative. QMD never participates in note, nap, or wake."""
-              % (ME, ME, ME, ME, ME, ME))
+LOG.txt remains authoritative. note and nap never use QMD; wake only reports
+whether semantic recall is enabled."""
+              % (ME, ME, ME, ME, ME, ME, ME, ME, ME))
         return
-    if args[0] not in ("enable", "status", "rebuild", "disable"):
+    if args[0] not in ("enable", "status", "sync", "rebuild", "config",
+                       "disable"):
         die("Unknown QMD command: %s.\nRun: %s qmd help" % (args[0], ME))
     command, rest = args[0], args[1:]
     if command == "status":
@@ -1878,6 +1911,9 @@ LOG.txt remains authoritative. QMD never participates in note, nap, or wake."""
         print("  QMD executable:  %s" % state["executable"])
         print("  Integration:     %s" %
               ("enabled" if state["enabled"] else "disabled"))
+        print("  Fallback:        %s" % (
+            "on" if state["fallback"] and state["enabled"] else
+            "on (inactive while disabled)" if state["fallback"] else "off"))
         print("  Projection:      %s" % state["projection"])
         print("  Collection:      %s" % state["collection"])
         print("  Embeddings:      %s" % state["embeddings"])
@@ -1914,6 +1950,46 @@ LOG.txt remains authoritative. QMD never participates in note, nap, or wake."""
                 "No OptMem memory was changed." % e)
         print("QMD semantic recall is enabled for %s." % pretty(d))
         print("The first semantic recall will update and embed the projection.")
+        return
+    if command == "config":
+        if len(rest) > 1:
+            die("usage: %s qmd config [FALLBACK=on|off]" % ME)
+        if rest:
+            key, separator, value = rest[0].partition("=")
+            if (not separator or key.strip().upper() != "FALLBACK" or
+                    value.strip().lower() not in ("on", "off")):
+                die("usage: %s qmd config [FALLBACK=on|off]" % ME)
+            enabled = value.strip().lower() == "on"
+            if enabled and not qmd_enabled(d):
+                die("QMD fallback requires an enabled integration.\n"
+                    "Run: %s qmd enable" % ME)
+            if enabled:
+                _qmd_mark(d, "fallback")
+            else:
+                try:
+                    os.unlink(_qmd_file(d, "fallback"))
+                except FileNotFoundError:
+                    pass
+                except QmdError as e:
+                    die("Could not update QMD fallback: %s." % e)
+        active = qmd_fallback(d)
+        print("FALLBACK=%s" % ("on" if active else "off"))
+        print("Ordinary zero-result recall %s semantic retrieval." %
+              ("may escalate to" if active else "will not invoke"))
+        return
+    if command == "sync":
+        if rest:
+            die("usage: %s qmd sync" % ME)
+        if not qmd_enabled(d):
+            die("QMD is not enabled for this memory. Run: %s qmd enable" % ME)
+        try:
+            records, segments = _qmd_index_projection(d, verify=True)
+        except QmdError as e:
+            die("Could not synchronize QMD: %s.\n"
+                "Raw OptMem memory is intact; retry sync later." % e)
+        print("QMD projection and embeddings are current for %s." % pretty(d))
+        print("%s in %s." %
+              (plural(records, "memory"), plural(segments, "segment")))
         return
     if command == "rebuild":
         if rest:
@@ -2011,7 +2087,8 @@ def _number_option(name, value, low, high):
 
 
 def _recall_args(args):
-    fuzzy, semantic, limit, context, query, i = False, False, None, 0, [], 0
+    fuzzy, semantic, fast = False, False, False
+    limit, context, query, i = None, 0, [], 0
     while i < len(args):
         arg = args[i]
         if arg == "--":
@@ -2021,6 +2098,8 @@ def _recall_args(args):
             fuzzy = True
         elif arg == "--semantic":
             semantic = True
+        elif arg == "--fast":
+            fast = True
         elif arg in ("--limit", "--context"):
             if i + 1 >= len(args):
                 die("%s needs a number." % arg)
@@ -2043,13 +2122,15 @@ def _recall_args(args):
             query.append(arg)
         i += 1
     if len(query) != 1:
-        die("usage: %s recall [--fuzzy|--semantic] [--limit N] "
+        die("usage: %s recall [--fuzzy|--semantic [--fast]] [--limit N] "
             "[--context N] <query>" % ME)
     if fuzzy and semantic:
         die("Use either --fuzzy or --semantic, not both.")
+    if fast and not semantic:
+        die("--fast requires --semantic.")
     if semantic and (limit is not None or context):
         die("--limit and --context apply to exact/FFF recall, not --semantic.")
-    return fuzzy, semantic, limit, context, query[0]
+    return fuzzy, semantic, fast, limit, context, query[0]
 
 
 def _memory_id(line):
@@ -2138,17 +2219,20 @@ def _qmd_result_ids(item, lo, hi, T):
     return ids[:QMD_MEMORIES_PER_SEGMENT]
 
 
-def _print_semantic(d, query):
+def _print_semantic(d, query, fast=False):
     if not qmd_enabled(d):
         die("Semantic recall unavailable: QMD is not enabled for this "
             "memory.\nRun: %s qmd enable\n"
             "Exact and FFF fuzzy recall are still available." % ME)
     try:
         T, _ = _qmd_index_projection(d)
-        raw = _qmd_run([
+        qmd_args = [
             "query", query, "--format", "json", "-n",
             str(QMD_QUERY_SEGMENTS), "-c", qmd_collection(d),
-        ], timeout=660)
+        ]
+        if fast:
+            qmd_args.append("--no-rerank")
+        raw = _qmd_run(qmd_args, timeout=660)
         payload = json.loads(raw or "[]")
     except (QmdError, ValueError) as e:
         die("Semantic recall failed: %s.\n"
@@ -2196,16 +2280,17 @@ def _print_semantic(d, query):
     scope = ("selected" if os.environ.get("MEMORY_DIR") else
              "global" if os.path.normcase(os.path.realpath(
                  os.path.abspath(d))) == global_path else "project")
-    print("Semantic matches in %s memory:\n" % scope)
+    mode = " (fast, no reranking)" if fast else ""
+    print("Semantic matches in %s memory%s:\n" % (scope, mode))
     print("\n\n".join("\n".join(block) for block in blocks))
     print("\n%s from %s." % (
         plural(memories, "likely memory"), plural(len(blocks), "matching block")))
 
 
 def cmd_recall(d, args):
-    fuzzy, semantic, limit, context, query = _recall_args(args)
+    fuzzy, semantic, fast, limit, context, query = _recall_args(args)
     if semantic:
-        _print_semantic(d, query)
+        _print_semantic(d, query, fast=fast)
         return
     if fuzzy:
         out, error = fff_recall(d, query, limit)
@@ -2244,6 +2329,18 @@ def cmd_recall(d, args):
         if fuzzy_out:
             print("No exact match. FFF fuzzy matches, strongest first:")
             _print_fuzzy(d, fuzzy_out, limit, context)
+            return
+        if qmd_enabled(d) and qmd_fallback(d):
+            if fuzzy_out is None:
+                print("No exact match; FFF fuzzy recall was unavailable. "
+                      "Trying QMD semantic fallback.")
+            else:
+                print("No exact or FFF fuzzy match. "
+                      "Trying QMD semantic fallback.")
+            if limit is not None or context:
+                print("Semantic fallback uses its own bounded result budget; "
+                      "--limit/--context apply only to exact and FFF recall.")
+            _print_semantic(d, query)
             return
         print("No match.")
         return
@@ -2411,6 +2508,9 @@ def cmd_doctor(d, args):
     print("  QMD executable:   %s" % qmd["executable"])
     print("  QMD integration: %s" %
           ("enabled" if qmd["enabled"] else "disabled"))
+    print("  QMD fallback:    %s" % (
+        "on" if qmd["fallback"] and qmd["enabled"] else
+        "on (inactive)" if qmd["fallback"] else "off"))
     print("  QMD projection:  %s" % qmd["projection"])
     print("  QMD collection:  %s" % qmd["collection"])
     print("  QMD embeddings:  %s" % qmd["embeddings"])
@@ -2480,17 +2580,18 @@ def main():
         if cmd == "qmd":
             qmd_args = argv[1:]
             read_only = (not qmd_args or qmd_args[0] in
-                         ("help", "--help", "-h", "status"))
+                         ("help", "--help", "-h", "status", "sync",
+                          "rebuild", "config", "disable"))
             invalid = bool(qmd_args and qmd_args[0] not in
-                           ("enable", "status", "rebuild", "disable",
-                            "help", "--help", "-h"))
+                           ("enable", "status", "sync", "rebuild", "config",
+                            "disable", "help", "--help", "-h"))
             if read_only or invalid:
                 cmd_qmd(memory_dir(), qmd_args)
                 return
         if cmd == "recall" and "--semantic" in argv[1:]:
-            _, semantic, _, _, query = _recall_args(argv[1:])
+            _, semantic, fast, _, _, query = _recall_args(argv[1:])
             if semantic and not qmd_enabled(memory_dir()):
-                _print_semantic(memory_dir(), query)
+                _print_semantic(memory_dir(), query, fast=fast)
                 return
         if cmd == "wake" and not SCOPE_GLOBAL and not os.environ.get("MEMORY_DIR"):
             wake_both(argv[1:])

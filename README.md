@@ -175,7 +175,9 @@ directory. Run `memo doctor` whenever the selected scope is surprising.
 | `memo qmd enable` | explicitly enable optional QMD semantic recall for this scope |
 | `memo qmd help` | explain the integration’s commands, isolation, and lazy behavior |
 | `memo qmd status` | inspect the QMD executable, projection, collection, and embeddings |
+| `memo qmd sync` | update the projection, index, and embeddings before they are needed |
 | `memo qmd rebuild` | rebuild this scope's disposable projection and QMD collection |
+| `memo qmd config [FALLBACK=on\|off]` | inspect or opt into semantic fallback after exact and FFF misses |
 | `memo qmd disable [--purge]` | disable QMD; optionally remove its projection |
 | `memo wake` | read both memories — global, then project; first command of every session |
 | `memo note "..."` | record one memory: one line, up to 280 UTF-8 bytes (project by default) |
@@ -183,6 +185,7 @@ directory. Run `memo doctor` whenever the selected scope is surprising.
 | `memo recall [--limit N] [--context N] <regex>` | search the complete raw log while controlling matches and neighboring entries |
 | `memo recall --fuzzy [--limit N] [--context N] "<text>"` | typo-tolerant raw-memory search with optional FFF |
 | `memo recall --semantic "<meaning>"` | meaning-based raw-memory recall with explicitly enabled QMD |
+| `memo recall --semantic --fast "<meaning>"` | semantic recall without QMD reranking, useful for repeated related searches |
 | `memo zoom [--depth N] <lo>-<hi>` | open one to six levels of a summary-tree node |
 | `memo forget <lo>-<hi>` | drop a bad summary; the next nap rebuilds it |
 | `memo config [NAME=N]` | inspect or change the active store's reading/output limits |
@@ -260,6 +263,7 @@ npm install -g @tobilu/qmd
 memo qmd help
 memo qmd enable
 memo recall --semantic "Why did we stop retrying mutation requests?"
+memo recall --semantic --fast "Where does the retry policy live?"
 ```
 
 QMD currently requires Node.js 22 or newer. The first semantic recall runs
@@ -274,17 +278,32 @@ store, so they do not enter the user's ordinary QMD knowledge base.
 
 ```sh
 memo qmd status
+memo qmd sync
 memo qmd rebuild
+memo qmd config FALLBACK=on
 memo qmd disable
 memo qmd disable --purge
 ```
+
+`memo qmd sync` prepays the same lazy projection, update, and embedding work
+that semantic recall would otherwise perform. Full semantic recall uses QMD's
+hybrid retrieval and reranking; `--fast` keeps hybrid retrieval but skips the
+reranker.
+
+`FALLBACK=on` is deliberately opt-in and per scope. With it enabled, ordinary
+`memo recall <regex>` tries exact recall, then FFF fuzzy recall, then QMD only
+if both return nothing. Invalid regular expressions still fail immediately,
+and explicit `--fuzzy` never escalates. Use `FALLBACK=off` to restore the
+default. The setting is retained by `disable` and removed by `--purge`, but it
+is inactive whenever QMD itself is disabled.
 
 `disable` unregisters the collection but keeps the disposable Markdown
 projection for a cheap re-enable. `--purge` removes the projection too.
 Neither command changes `LOG.txt`, `TREE/`, or any memory. QMD synchronization
 is lazy: `note`, `nap`, and `wake` never launch Node or generate projection
-files. If semantic recall fails, OptMem reports that failure explicitly while
-exact and FFF recall remain available.
+files. When QMD is enabled, the final `wake` page only adds a small capability
+line; it does not invoke QMD. If semantic recall fails, OptMem reports that
+failure explicitly while exact and FFF recall remain available.
 
 ## Why split memory
 
@@ -459,7 +478,9 @@ directly. Add `--limit N` to cap matched entries and `--context N` to
 include neighboring raw memories; neither makes the search less complete.
 Recall and `zoom` read the project memory; put `--global` first for global.
 If QMD was explicitly enabled for this scope, use
-`memo recall --semantic "<meaning>"` for meaning-based raw-memory recall.
+`memo recall --semantic "<meaning>"` for meaning-based raw-memory recall;
+add `--fast` to skip reranking for repeated related searches. QMD can also be
+configured as the last fallback after exact and fuzzy recall both miss.
 
 A `#a-b` line from `wake` is one summary node covering raw memory IDs
 `a` through `b`. `memo zoom <a-b>` opens one level; add `--depth N`
