@@ -96,7 +96,7 @@ ME = TOOL
 
 # The memory that follows you everywhere, as opposed to the one per project.
 GLOBAL = "~/.optmem/memory"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 INSTALL_BASE = "https://github.com/doeixd/OptMem/releases/latest/download"
 SCOPE_GLOBAL = False  # set by main() from `--global`
 
@@ -1868,9 +1868,20 @@ def cmd_wake(d, args, tail=True, continuation=None):
         return True
 
 
-def wake_both(args):
-    """Read the global memory first, then the project memory. Paging arguments
-    address the project; an unfinished global page must be completed first."""
+def wake_project(args):
+    """Read the project scope and keep every continuation inside that scope."""
+    d = store()
+    config(d)
+    print("== Project memory: %s ==" % pretty(d))
+    cmd_wake(d, args)
+
+
+def wake_both():
+    """Read the global memory first, then the project memory.
+
+    Only a bare `wake` enters here. A `wake` with paging arguments is already
+    a project continuation and must not restart the global document.
+    """
     global ME
     g = os.path.expanduser(GLOBAL)
     if os.path.isdir(g):
@@ -1886,10 +1897,7 @@ def wake_both(args):
     else:
         print("No global memory yet; only this project will be remembered.\n"
               "To create one, run: %s init\n" % TOOL)
-    d = store()
-    config(d)
-    print("== Project memory: %s ==" % pretty(d))
-    cmd_wake(d, args)
+    wake_project([])
 
 
 def cmd_note(d, args):
@@ -3397,6 +3405,8 @@ def main():
         print(usage, file=sys.stderr)
         print("\nRun: %s --help" % TOOL, file=sys.stderr)
         sys.exit(1)
+    if then_project and (not SCOPE_GLOBAL or cmd != "wake"):
+        die("Invalid wake continuation. Run: %s wake" % TOOL)
     try:
         # `init` is the only command that may run without an existing memory:
         # it is the one that creates it. Every other command refuses, so a
@@ -3438,8 +3448,9 @@ def main():
             if semantic and not qmd_enabled(memory_dir()):
                 _print_semantic(memory_dir(), query, fast=fast)
                 return
-        if cmd == "wake" and not SCOPE_GLOBAL and not os.environ.get("MEMORY_DIR"):
-            wake_both(argv[1:])
+        if (cmd == "wake" and not argv[1:] and not SCOPE_GLOBAL and
+                not os.environ.get("MEMORY_DIR")):
+            wake_both()
             return
         if cmd == "doctor":
             cmd_doctor(memory_dir(), argv[1:])
@@ -3460,13 +3471,12 @@ def main():
                             continuation=TOOL + " --global --then-project")
             if done:
                 print()
-                project = scope_dir()
-                os.makedirs(os.path.join(project, "TREE"), exist_ok=True)
-                open(log_path(project), "a").close()
-                config(project)
-                print("== Project memory: %s ==" % pretty(project))
+                # Return to the ordinary project path so symlink checks,
+                # identity recording, configuration, and future hardening all
+                # remain centralized in store().
+                SCOPE_GLOBAL = False
                 ME = TOOL
-                cmd_wake(project, [])
+                wake_project([])
             return
         COMMANDS[cmd](d, argv[1:])
     except OSError as e:

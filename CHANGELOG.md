@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.1 — 2026-07-27
+
+### Wake reliability
+
+- Fixed multi-page project wake continuations restarting global memory after
+  the global-to-project handoff.
+- Routed the paginated handoff through the normal store initialization path so
+  symlink checks, project identity recording, and later hardening always apply.
+- Added an end-to-end regression that follows every printed continuation
+  through multi-page global and project memories to one final awake state.
+
 ## 1.0.0 — 2026-07-27
 
 Initial stable release of the project-scoped OptMem fork.

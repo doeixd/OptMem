@@ -584,16 +584,18 @@ check(obeyed.returncode == 0 and "saved" in obeyed.stdout,
       "the order the tool printed does not run with nothing on PATH: %r -> %s"
       % (order[0], obeyed.stderr.strip()))
 
-# A paginated global wake must enter the project after its final page. Without
-# the private continuation marker, it would say "awake" after global page 2
-# and silently skip all project context.
+# A paginated global wake must enter the project after its final page, and a
+# paginated project must then continue without restarting global page 1.
 subprocess.run(memo + ["--global", "config", "PART_LINES=1"],
                env=fresh, capture_output=True, check=True)
 for text in ("global page one", "global page two"):
     subprocess.run(memo + ["--global", "note", text],
                    env=fresh, capture_output=True, check=True)
-subprocess.run(memo + ["note", "project page after global"],
+subprocess.run(memo + ["config", "PART_LINES=1"],
                env=fresh, capture_output=True, check=True)
+for text in ("project page one", "project page two"):
+    subprocess.run(memo + ["note", text],
+                   env=fresh, capture_output=True, check=True)
 page1 = subprocess.run(memo + ["wake"], env=fresh,
                        capture_output=True, text=True, check=True)
 continuations = [l.split("Run: ", 1)[1] for l in page1.stdout.splitlines()
@@ -602,16 +604,53 @@ check(len(continuations) == 1,
       "a paged global wake lost its project continuation:\n" + page1.stdout)
 if continuations:
     if os.name == "nt":
-        final_page = subprocess.run(
+        bridge = subprocess.run(
             ["powershell", "-NoProfile", "-Command", continuations[0]],
             env=fresh, capture_output=True, text=True)
     else:
-        final_page = subprocess.run(continuations[0], shell=True, env=fresh,
-                                    capture_output=True, text=True)
-    check(final_page.returncode == 0
-          and "project page after global" in final_page.stdout,
+        bridge = subprocess.run(continuations[0], shell=True, env=fresh,
+                                capture_output=True, text=True)
+    check(bridge.returncode == 0
+          and "global page two" in bridge.stdout
+          and "== Project memory:" in bridge.stdout,
           "global pagination never entered the project:\n"
-          + final_page.stdout + final_page.stderr)
+          + bridge.stdout + bridge.stderr)
+    project_pages = [bridge.stdout]
+    current = bridge
+    for _ in range(16):
+        project_continuations = [
+            l.split("Run: ", 1)[1] for l in current.stdout.splitlines()
+            if l.startswith("Not awake yet. Run: ")
+            and "--then-project" not in l
+        ]
+        if not project_continuations:
+            break
+        check(len(project_continuations) == 1,
+              "project pagination did not print one project continuation:\n"
+              + current.stdout)
+        if len(project_continuations) != 1:
+            break
+        if os.name == "nt":
+            current = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 project_continuations[0]],
+                env=fresh, capture_output=True, text=True)
+        else:
+            current = subprocess.run(project_continuations[0], shell=True,
+                                     env=fresh, capture_output=True, text=True)
+        project_pages.append(current.stdout)
+        check(current.returncode == 0
+              and "== Global memory:" not in current.stdout
+              and "global page one" not in current.stdout,
+              "project continuation restarted global memory:\n"
+              + current.stdout + current.stderr)
+    project_document = "\n".join(project_pages)
+    check("project page one" in project_document
+          and "project page two" in project_document
+          and project_document.count("You are awake.") == 1
+          and "Not awake yet." not in current.stdout,
+          "project pagination did not finish exactly once:\n"
+          + project_document + current.stderr)
 
 # a size written by hand into `config` must not brick the tool with a
 # recovery that is itself broken: name the file and the line
