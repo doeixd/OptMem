@@ -1,0 +1,115 @@
+# Contributing to OptMem
+
+OptMem deliberately has a small surface area: one Python file, one invariant
+suite, and thin installers. Changes should preserve that simplicity.
+
+## Development setup
+
+Requirements:
+
+- Python 3.7 or newer for the core tool;
+- Git;
+- Bash when changing `install.sh`;
+- PowerShell when changing `install.ps1`;
+- optionally Python 3.10+ and `fff-search` for real fuzzy-recall validation.
+
+There is no build or package-install step:
+
+```sh
+git clone https://github.com/doeixd/OptMem.git
+cd OptMem
+python3 test.py
+```
+
+On Windows:
+
+```powershell
+git clone https://github.com/doeixd/OptMem.git
+Set-Location OptMem
+py -3 test.py
+```
+
+## Repository map
+
+- `memo` — the complete CLI and storage implementation.
+- `test.py` — deterministic invariant, corruption, pagination, concurrency,
+  scope, Windows, and CLI tests.
+- `install.sh` — Linux/macOS installer.
+- `install.ps1` and `memo.cmd` — native Windows installer and launcher.
+- `README.md` — first-run and command documentation.
+- `AGENT_SETUP.md` — operational guidance for agents.
+- `WINDOWS.md` — Windows-specific setup and locking details.
+
+## Design invariants
+
+Please preserve these unless a change explicitly redesigns them:
+
+- `LOG.txt` is append-only and is the source of truth.
+- Records remain fixed width; position is memory identity.
+- `TREE/` is a rebuildable cache, never the only copy of information.
+- Core commands require only the Python standard library.
+- FFF is optional because its Python bindings require Python 3.10+.
+- Every command printed by OptMem must be directly runnable on the platform
+  that printed it.
+- A missing explicit `MEMORY_DIR` is an error; a project store may be created
+  automatically.
+- `memo wake` must not claim the agent is awake until all pages and required
+  compressions are complete.
+- Concurrent writers must receive unique IDs without losing records.
+- Re-running `memo init` or either installer must preserve memory data and
+  user configuration.
+
+## Validation
+
+Run the complete suite:
+
+```sh
+python3 -m py_compile memo test.py
+python3 test.py
+```
+
+Validate installer syntax when available:
+
+```sh
+bash -n install.sh
+```
+
+```powershell
+$tokens = $null
+$errors = $null
+[System.Management.Automation.Language.Parser]::ParseFile(
+    (Resolve-Path .\install.ps1),
+    [ref]$tokens,
+    [ref]$errors
+) | Out-Null
+$errors
+```
+
+Check patch whitespace:
+
+```sh
+git diff --check
+```
+
+For a real FFF smoke test on Python 3.10+:
+
+```sh
+python3 -m pip install fff-search
+export MEMORY_DIR="$(mktemp -d)"
+python3 memo init
+python3 memo note "windows locking uses msvcrt byte ranges"
+python3 memo recall --fuzzy "windws loking msvrt"
+```
+
+Use an isolated environment for dependency testing; FFF must not become a core
+import or required installer dependency.
+
+## Change checklist
+
+- Add or update a regression test for observable behavior.
+- Test both project and `--global` scope when scope is relevant.
+- Consider native Windows path, locking, quoting, and home-directory behavior.
+- Keep error messages actionable and free of tracebacks for expected failures.
+- Keep README examples synchronized with the generated agent template.
+- Do not edit memory files in tests outside temporary directories.
+- Do not commit generated caches, test memories, or native wheels.

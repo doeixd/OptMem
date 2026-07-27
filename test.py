@@ -122,14 +122,15 @@ def run(*args, store=None):
 
 def nap_id(out):
     """The block id from the command a nap prompt offers."""
-    m = re.search(r"memo nap (\d+)-(\d+)", out)
+    m = re.search(r"\bnap (\d+)-(\d+)", out)
     return "%s-%s" % m.groups() if m else None
 
 
 def offered(out):
     """The line offering a command. Every command handed to an agent must be
     an order, not a label: `Run: memo ...`, never `next: memo ...`."""
-    return [l for l in out.splitlines() if "memo nap " in l or "memo wake " in l]
+    return [l for l in out.splitlines()
+            if l.startswith("Run: ") and (" nap " in l or " wake " in l)]
 
 
 # the real entry point still has to work: shebang, argv parsing, exit code
@@ -145,18 +146,66 @@ check(ghost.returncode == 1 and "No memory at" in ghost.stderr,
       "a missing MEMORY_DIR was created instead of reported")
 check(not os.path.exists(d + "-typo"), "a missing MEMORY_DIR was created")
 
-# the fresh-user path: no MEMORY_DIR, wake refuses, init creates the memory,
-# prints the paste block, and is idempotent
+# the fresh-user path: no MEMORY_DIR, wake creates a project memory and says
+# the global one is missing; init creates that one and remains idempotent
 fresh = {k: v for k, v in os.environ.items() if k != "MEMORY_DIR"}
 fresh["HOME"] = tempfile.mkdtemp()
+fresh["USERPROFILE"] = fresh["HOME"]
+fresh["XDG_DATA_HOME"] = os.path.join(fresh["HOME"], ".local", "share")
+helped = subprocess.run(memo + ["--help"], capture_output=True, text=True,
+                        env=fresh)
+check(helped.returncode == 0 and "Usage:" in helped.stdout
+      and "doctor" in helped.stdout and "recall --fuzzy" in helped.stdout,
+      "--help is not a useful command overview:\n" + helped.stdout + helped.stderr)
+help_alias = subprocess.run(memo + ["help"], capture_output=True, text=True,
+                            env=fresh)
+check(help_alias.returncode == 0 and help_alias.stdout == helped.stdout,
+      "help and --help disagree")
+unknown = subprocess.run(memo + ["wat"], capture_output=True, text=True,
+                         env=fresh)
+check(unknown.returncode == 1 and "No such command: wat" in unknown.stderr
+      and "Run:" in unknown.stderr and "--help" in unknown.stderr,
+      "an unknown command did not point back to help:\n" + unknown.stderr)
+diagnosed = subprocess.run(memo + ["doctor"], capture_output=True, text=True,
+                           env=fresh)
+check(diagnosed.returncode == 0 and "OptMem doctor" in diagnosed.stdout
+      and "Active scope:" in diagnosed.stdout
+      and "Global store:" in diagnosed.stdout and "FFF recall:" in diagnosed.stdout,
+      "doctor did not explain the installation:\n"
+      + diagnosed.stdout + diagnosed.stderr)
+check(not os.path.exists(os.path.join(fresh["HOME"], ".optmem", "memory")),
+      "doctor created the missing global store")
 noenv = subprocess.run(memo + ["wake"], capture_output=True, text=True, env=fresh)
-check(noenv.returncode == 1 and "memo init" in noenv.stderr,
-      "with no MEMORY_DIR and no memory, wake must point at init")
+check(noenv.returncode == 0 and "No global memory yet" in noenv.stdout
+      and " init" in noenv.stdout,
+      "with no global memory, wake must still work and point at init:\n"
+      + noenv.stdout + noenv.stderr)
 init = subprocess.run(memo + ["init"], capture_output=True, text=True, env=fresh)
 check(init.returncode == 0 and "## Memory" in init.stdout
       and "You are a" in init.stdout, "init must print the AGENTS.md block")
+check("BEGIN OPTMEM AGENT INSTRUCTIONS" in init.stdout
+      and "END OPTMEM AGENT INSTRUCTIONS" in init.stdout
+      and "Verify this installation" in init.stdout,
+      "init did not delimit the copyable block or explain the next step")
 check(os.path.exists(os.path.join(fresh["HOME"], ".optmem", "memory", "config")),
       "init must create ~/.optmem/memory with its config")
+global_doctor = subprocess.run(memo + ["--global", "doctor"],
+                               capture_output=True, text=True, env=fresh)
+check(global_doctor.returncode == 0
+      and "Active scope:  global" in global_doctor.stdout
+      and "Active store:" in global_doctor.stdout,
+      "--global doctor did not diagnose the global store:\n"
+      + global_doctor.stdout + global_doctor.stderr)
+override_dir = os.path.join(fresh["HOME"], "missing-explicit-store")
+override_doctor = subprocess.run(
+    memo + ["doctor"], capture_output=True, text=True,
+    env=dict(fresh, MEMORY_DIR=override_dir))
+check(override_doctor.returncode == 0
+      and "Active scope:  MEMORY_DIR override" in override_doctor.stdout
+      and "not created" in override_doctor.stdout
+      and not os.path.exists(override_dir),
+      "doctor did not safely diagnose a missing MEMORY_DIR:\n"
+      + override_doctor.stdout + override_doctor.stderr)
 again = subprocess.run(memo + ["init"], capture_output=True, text=True, env=fresh)
 check(again.returncode == 0 and "Found" in again.stdout, "init must be idempotent")
 woke = subprocess.run(memo + ["wake"], capture_output=True, text=True, env=fresh)
@@ -166,25 +215,60 @@ check(woke.returncode == 0 and "You are awake." in woke.stdout,
 # Every command the tool prints must RUN on the machine it printed it on.
 # `curl | sh` puts nothing on PATH, so a bare `memo nap ...` would not: the
 # whole loop (note -> merge prompt -> nap) dies on `command not found`.
-bare = dict(fresh, PATH="/usr/bin:/bin")
+bare = dict(fresh, PATH=(os.environ.get("PATH", "") if os.name == "nt"
+                         else "/usr/bin:/bin"))
 subprocess.run(memo + ["note", "the first thing that happened"], env=bare,
                capture_output=True)
 asked = subprocess.run(memo + ["note", "the second thing that happened"],
                        env=bare, capture_output=True, text=True)
 order = [l[5:] for l in asked.stdout.splitlines() if l.startswith("Run: ")]
 check(len(order) == 1, "note did not order a compression: " + asked.stdout)
-obeyed = subprocess.run(order[0].replace('"<your line>"', '"both things"'),
-                        shell=True, env=bare, capture_output=True, text=True)
+command = order[0].replace('"<your line>"', '"both things"')
+if os.name == "nt":
+    obeyed = subprocess.run(["powershell", "-NoProfile", "-Command", command],
+                            env=bare, capture_output=True, text=True)
+else:
+    obeyed = subprocess.run(command, shell=True, env=bare,
+                            capture_output=True, text=True)
 check(obeyed.returncode == 0 and "saved" in obeyed.stdout,
       "the order the tool printed does not run with nothing on PATH: %r -> %s"
       % (order[0], obeyed.stderr.strip()))
+
+# A paginated global wake must enter the project after its final page. Without
+# the private continuation marker, it would say "awake" after global page 2
+# and silently skip all project context.
+subprocess.run(memo + ["--global", "config", "PART_LINES=1"],
+               env=fresh, capture_output=True, check=True)
+for text in ("global page one", "global page two"):
+    subprocess.run(memo + ["--global", "note", text],
+                   env=fresh, capture_output=True, check=True)
+subprocess.run(memo + ["note", "project page after global"],
+               env=fresh, capture_output=True, check=True)
+page1 = subprocess.run(memo + ["wake"], env=fresh,
+                       capture_output=True, text=True, check=True)
+continuations = [l.split("Run: ", 1)[1] for l in page1.stdout.splitlines()
+                 if "Run: " in l and "--then-project" in l]
+check(len(continuations) == 1,
+      "a paged global wake lost its project continuation:\n" + page1.stdout)
+if continuations:
+    if os.name == "nt":
+        final_page = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", continuations[0]],
+            env=fresh, capture_output=True, text=True)
+    else:
+        final_page = subprocess.run(continuations[0], shell=True, env=fresh,
+                                    capture_output=True, text=True)
+    check(final_page.returncode == 0
+          and "project page after global" in final_page.stdout,
+          "global pagination never entered the project:\n"
+          + final_page.stdout + final_page.stderr)
 
 # a size written by hand into `config` must not brick the tool with a
 # recovery that is itself broken: name the file and the line
 badcfg = os.path.join(fresh["HOME"], ".optmem", "memory", "config")
 with open(badcfg, "a") as f:
     f.write("WAKE_LNES = 100\n")
-for c in (["wake"], ["config"]):
+for c in (["wake"], ["--global", "config"]):
     r_ = subprocess.run(memo + c, capture_output=True, text=True, env=fresh)
     check(r_.returncode == 1 and "config line" in r_.stderr
           and "WAKE_LNES" in r_.stderr,
@@ -196,7 +280,8 @@ open(badcfg, "w").write("")
 r_ = subprocess.run(memo + ["init"], capture_output=True, text=True,
                     env=dict(fresh, MEMORY_DIR=MEMO))   # a file, not a store
 check(r_.returncode == 1 and "Traceback" not in r_.stderr
-      and "Not a directory" in r_.stderr,
+      and ("Not a directory" in r_.stderr
+           or "cannot find the path specified" in r_.stderr.lower()),
       "a filesystem error printed a traceback: " + r_.stderr)
 
 
@@ -269,7 +354,7 @@ lines = [l for p in parts for l in p]
 check(len(lines) == WAKE_LINES, "woke with %d lines, want %d" % (len(lines), WAKE_LINES))
 check(lines[-1].startswith("#%d " % (N - 1)), "newest memory not last / not raw")
 check(lines[0].startswith("#0-"), "oldest line should be a summary block")
-check(re.search(r"Run: \S*memo wake 2", run("wake").stdout),
+check(re.search(r"Run: .* wake 2", run("wake").stdout),
       "part 1 must ORDER the next command, not label it")
 check("You are awake." in run("wake", str(len(parts))).stdout,
       "last part must say it is last")
@@ -299,6 +384,25 @@ check("memory number 7," in r.stdout, "recall cannot find a memory by id")
 r = run("recall", "2020-01-02")
 check("#7 " in r.stdout and "5 matches." in r.stdout,
       "recall cannot find memories by date: " + r.stdout)
+
+# FFF is optional: exact recall stays dependency-free, while explicit fuzzy
+# recall and zero-result fallback consume its strongest-first raw-memory lines.
+real_fff_recall = cli.fff_recall
+fuzzy_line = "#7 2020-01-02 memory number 7, a thing that happened"
+cli.fff_recall = lambda store, query: ([fuzzy_line], None)
+r = run("recall", "--fuzzy", "memry numbr sevn")
+check(r.returncode == 0 and fuzzy_line in r.stdout
+      and "FFF, strongest first" in r.stdout,
+      "explicit FFF recall did not render its result: " + r.stdout + r.stderr)
+r = run("recall", "definitely absent exact phrase")
+check(r.returncode == 0 and "No exact match" in r.stdout
+      and fuzzy_line in r.stdout,
+      "zero exact results did not fall back to FFF: " + r.stdout + r.stderr)
+cli.fff_recall = lambda store, query: (None, "not installed")
+r = run("recall", "--fuzzy", "anything")
+check(r.returncode == 1 and "pip install fff-search" in r.stderr,
+      "forced FFF recall did not explain how to enable it: " + r.stderr)
+cli.fff_recall = real_fff_recall
 
 
 # zoom: one tree node, opened into its two halves. The tool only reads;
@@ -343,7 +447,7 @@ check(run("zoom", "9-3").returncode == 1, "zoom accepted a backwards range")
 check(run("zoom").returncode == 1, "zoom with no id must show usage")
 r = run("zoom", "1048576-2097151")
 check(r.returncode == 1 and "beyond the memory" in r.stderr
-      and "memo wake" in r.stderr, "zoom past the end must name a way back")
+      and " wake" in r.stderr, "zoom past the end must name a way back")
 
 
 def treesize():
@@ -504,13 +608,15 @@ check(r.returncode == 1 and "forget 0-1" in r.stderr
 
 # an unreadable level is a filesystem failure and must surface as one --
 # reading it as "not compressed yet" offers work that cannot be done
-os.chmod(os.path.join(d3, "TREE", "2"), 0)
-r_ = subprocess.run(memo + ["wake"], capture_output=True, text=True,
-                    env=dict(os.environ, MEMORY_DIR=d3))
-check(r_.returncode == 1 and "Permission denied" in r_.stderr
-      and "not compressed" not in r_.stdout,
-      "an unreadable level was read as pending work: " + r_.stdout + r_.stderr)
-os.chmod(os.path.join(d3, "TREE", "2"), 0o644)
+if os.name != "nt":  # chmod does not remove read access on Windows
+    os.chmod(os.path.join(d3, "TREE", "2"), 0)
+    r_ = subprocess.run(memo + ["wake"], capture_output=True, text=True,
+                        env=dict(os.environ, MEMORY_DIR=d3))
+    check(r_.returncode == 1 and "Permission denied" in r_.stderr
+          and "not compressed" not in r_.stdout,
+          "an unreadable level was read as pending work: "
+          + r_.stdout + r_.stderr)
+    os.chmod(os.path.join(d3, "TREE", "2"), 0o644)
 
 # an impossible calendar date would poison every later import: the store's
 # order check compares against it forever
@@ -605,6 +711,73 @@ check(fingerprint(d) == before, "init modified an existing memory")
 r = run("wake")
 check(r.stdout.rstrip().endswith("You are awake."), "wake broke after re-init")
 
+# ---- scope: which memory a command speaks to, when nothing points at one
+# Every test above pins MEMORY_DIR, so it also proves MEMORY_DIR still wins.
+xdg = tempfile.mkdtemp(prefix="optmem-xdg-")
+os.environ["XDG_DATA_HOME"] = xdg
+os.environ.pop("MEMORY_DIR", None)
+real_git = cli.git
+
+
+def as_repo(url, checkout=""):
+    """Resolve a scope with a fake origin and checkout."""
+    def fake_git(*args):
+        if args[:2] == ("remote", "get-url"):
+            return url or ""
+        if args[:2] == ("rev-parse", "--show-toplevel"):
+            return checkout
+        return ""
+    cli.git = fake_git
+    try:
+        return cli.scope_dir()
+    finally:
+        cli.git = real_git
+
+
+ssh = as_repo("git@github-texarkanine.com:Texarkanine/OptMem.git")
+check(ssh == os.path.join(xdg, "optmem", "repo", "Texarkanine", "OptMem"),
+      "an ssh remote did not reduce to owner/repo: " + ssh)
+check(as_repo("https://github.com/Texarkanine/OptMem") == ssh,
+      "one repo split across two remote spellings")
+check(as_repo("git@github.com:Texarkanine/OptMem.git/") == ssh,
+      "a trailing slash forked the memory of one repo")
+fallback = as_repo(None, os.path.abspath(os.sep + os.path.join("work", "repo")))
+check(fallback.startswith(os.path.join(xdg, "optmem", "path")),
+      "no remote did not fall back to a portable path: " + fallback)
+check(":" not in os.path.relpath(fallback, os.path.join(xdg, "optmem")),
+      "the fallback scope contains an invalid Windows drive separator: "
+      + fallback)
+check(as_repo("", os.path.abspath(os.sep + os.path.join("work", "repo")))
+      == fallback, "an empty remote is not the no-remote case")
+
+# --global reaches the one memory that is not a project's, and nothing else.
+cli.SCOPE_GLOBAL = True
+check(cli.memory_dir() == os.path.expanduser(cli.GLOBAL), "--global missed")
+os.environ["MEMORY_DIR"] = d
+check(cli.memory_dir() == d, "MEMORY_DIR no longer wins over --global")
+os.environ.pop("MEMORY_DIR")
+cli.SCOPE_GLOBAL = False
+
+# end to end: a real checkout remembers into its own memory, not the global.
+repo = tempfile.mkdtemp(prefix="optmem-repo-")
+subprocess.run(["git", "init", "-q", repo], check=True)
+subprocess.run(["git", "-C", repo, "remote", "add", "origin",
+                "git@github.com:acme/widget.git"], check=True)
+e2e = subprocess.run(memo + ["note", "scoped memories land in the project"],
+                     cwd=repo, capture_output=True, text=True,
+                     env=dict(os.environ, XDG_DATA_HOME=xdg))
+check(e2e.returncode == 0 and "Saved as #0." in e2e.stdout,
+      "a fresh checkout could not record its first memory: "
+      + e2e.stdout + e2e.stderr)
+log = os.path.join(xdg, "optmem", "repo", "acme", "widget", "LOG.txt")
+check(os.path.exists(log), "the project memory was not created at " + log)
+r = subprocess.run(memo + ["recall", "scoped"], cwd=repo, capture_output=True,
+                   text=True, env=dict(os.environ, XDG_DATA_HOME=xdg))
+check("1 match" in r.stdout or "scoped memories" in r.stdout,
+      "recall did not read the project memory: " + r.stdout + r.stderr)
+
+shutil.rmtree(repo)
+shutil.rmtree(xdg)
 shutil.rmtree(d2)
 shutil.rmtree(d)
 print("\n%d passed, %d failed" % (ok, fail))

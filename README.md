@@ -1,44 +1,191 @@
 # OptMem
 
-Permanent memory for AI agents. A 426-token prompt, a script, plug and play.
+Permanent, local memory for AI coding agents.
+
+OptMem gives an agent continuity across sessions, compaction, models, and
+vendors. Memories are append-only plain text on your machine: one focused
+store per project, plus one small global store for facts that follow you
+everywhere. There is no account, server, background daemon, or required Python
+package.
+
+This fork builds on [VictorTaelin/OptMem](https://github.com/VictorTaelin/OptMem)
+and adds project-scoped memory, native Windows support, optional FFF recall,
+and a polished agent/install workflow.
 
 ![how OptMem works](anim/optmem.gif)
 
-## Install
+## 60-second setup
+
+Prerequisite: Python 3.7 or newer. FFF-powered fuzzy recall is optional and
+requires Python 3.10 or newer.
+
+### Linux and macOS
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/VictorTaelin/OptMem/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/doeixd/OptMem/main/install.sh | sh
 ```
 
-It prints a `## Memory` block. Paste that at the top of your agent's
-`AGENTS.md` (or `CLAUDE.md`), and you are done. Run the same line again to
-update.
+### Windows PowerShell
 
-The tool lands at `~/.optmem/memo`; put `~/.optmem` on `PATH` to type `memo`.
+```powershell
+irm https://raw.githubusercontent.com/doeixd/OptMem/main/install.ps1 | iex
+```
+
+The installer validates the download, installs the tool under `~/.optmem`, and
+creates the global store without touching existing memories. It then prints a
+block between `BEGIN OPTMEM AGENT INSTRUCTIONS` and
+`END OPTMEM AGENT INSTRUCTIONS`.
+
+1. Copy that block into the top of `AGENTS.md`, `CLAUDE.md`, or your agent's
+   persistent instruction file.
+2. Start a new agent session inside a project.
+3. Verify the setup:
+
+```sh
+~/.optmem/memo doctor
+```
+
+On Windows:
+
+```powershell
+& "$HOME\.optmem\memo.cmd" doctor
+```
+
+Adding `~/.optmem` to `PATH` is optional. Generated agent instructions use the
+full executable path, so they work immediately.
+
+<details>
+<summary>Review the installer before running it</summary>
+
+Linux/macOS:
+
+```sh
+curl -fsSLo install-optmem.sh https://raw.githubusercontent.com/doeixd/OptMem/main/install.sh
+less install-optmem.sh
+sh install-optmem.sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/doeixd/OptMem/main/install.ps1 -OutFile install-optmem.ps1
+Get-Content .\install-optmem.ps1
+powershell -ExecutionPolicy Bypass -File .\install-optmem.ps1
+```
+
+</details>
+
+## Use it with an agent
+
+Once the generated block is in the agent's instructions, normal operation is
+automatic:
+
+1. At session start, the agent runs `memo wake` and reads global context
+   followed by this project's context.
+2. During work, it records durable decisions and discoveries with
+   `memo note "..."`.
+3. If a note requests a compression, the agent completes that `memo nap`
+   before continuing.
+4. When older information is needed, the agent uses exact or fuzzy `recall`,
+   then `zoom` to inspect a summary in more detail.
+
+Good project memory:
+
+```text
+The API client retries 429 responses with capped exponential backoff.
+```
+
+Good global memory:
+
+```text
+The user prefers concise status updates and PowerShell examples.
+```
+
+Do not record temporary progress, guesses, secrets, or facts already captured.
+See [AGENT_SETUP.md](AGENT_SETUP.md) for setup patterns, a first-session
+walkthrough, and guidance for subagents.
+
+## The mental model
+
+| Scope | How to address it | What belongs there |
+|---|---|---|
+| Current project | `memo note "..."` | Architecture, commands, decisions, failed approaches, repository-specific preferences |
+| Global | `memo --global note "..."` | User preferences, machine/tooling facts, durable information true across unrelated repositories |
+| Explicit override | Set `MEMORY_DIR` | Advanced use: pin every command to one chosen store and bypass project/global scoping |
+
+`memo wake` is special: without `MEMORY_DIR`, it reads global memory first and
+project memory second. Other commands target only one scope. Put `--global`
+before the command—not after it.
+
+Projects are keyed by the Git `origin` reduced to `owner/repo`, so worktrees
+and differently named checkouts share memory. Without an origin, OptMem falls
+back to the repository root; outside Git, it falls back to the current
+directory. Run `memo doctor` whenever the selected scope is surprising.
 
 ## Commands
 
-| | |
+| Command | Purpose |
 |---|---|
-| `memo wake` | read the memory — the first command of every session |
-| `memo note "..."` | record one memory: one line, up to 280 chars |
+| `memo doctor` | explain the active scope, store paths, Python, PATH, Git origin, and FFF availability |
+| `memo wake` | read both memories — global, then project; first command of every session |
+| `memo note "..."` | record one memory: one line, up to 280 chars (project by default) |
 | `memo nap` | answer the merges that came due |
 | `memo recall <regex>` | search every memory ever recorded, word for word |
+| `memo recall --fuzzy "<text>"` | typo-tolerant memory search with optional FFF |
 | `memo zoom <lo>-<hi>` | open a tree node into its two halves |
 | `memo forget <lo>-<hi>` | drop a bad summary; the next nap rebuilds it |
+| `memo config [NAME=N]` | inspect or change the active store's reading/output limits |
+| `memo import <file>` | bootstrap an empty store from `YYYY-MM-DD <text>` lines |
+| `memo --help` | show the complete command overview |
 
-Merges arrive one at a time, in the output of `note`. Nothing ever runs in the
-background.
+Put `--global` before any command to reach the memory that follows you into
+every project. Merges arrive one at a time, in the output of `note`. Nothing
+ever runs in the background.
+
+### Optional fuzzy recall with FFF
+
+OptMem has no required Python packages. On Python 3.10+, install
+[FFF](https://github.com/dmtrKovalenko/fff) to add typo-tolerant recall:
+
+```sh
+python3 -m pip install fff-search
+memo recall --fuzzy "aproximate memry"
+```
+
+Normal `recall <regex>` remains an exact, dependency-free scan. When it finds
+nothing and FFF is installed, OptMem automatically retries fuzzily and ranks
+the strongest matches first. FFF is instantiated only for that recall command;
+OptMem remains a one-shot CLI, so this integration uses FFF for match quality,
+not its long-lived warm-index performance.
+
+## Why split memory
+
+A single log is one identity, and wake spends its reading budget on the
+present. That is right for one continuous workstream and wrong for several:
+interleaved projects make each one's detail decay while work happens
+elsewhere, so an old project can wake up with its memories intact in the log
+but out of reach of the context budget.
+
+Every command therefore speaks to the memory of the project in `$PWD`, keyed
+by the origin remote reduced to `owner/repo` (every worktree and host alias for
+one repo is one memory). `--global` reaches the one that follows you
+everywhere. `wake` alone reads both: who you are, then where you are. Almost
+everything belongs in the project; use `--global` only for what would still be
+true tomorrow in a repository you have never seen.
 
 ## Files
 
 ```
 ~/.optmem/
-  memo          the tool: one file of Python 3, no dependencies
-  memory/
-    LOG.txt     every memory, one per line, append-only, never edited
-    TREE/       the summaries: a cache, rebuildable from the log alone
-    config      the sizes, written by `memo config`
+  memo              the tool: one file of Python 3, no required dependencies
+  memo.cmd          Windows launcher
+  memory/           the global memory (create with `memo init`)
+    LOG.txt         every memory, one per line, append-only, never edited
+    TREE/           the summaries: a cache, rebuildable from the log alone
+    config          the sizes, written by `memo config`
+
+$XDG_DATA_HOME/optmem/   (default: ~/.local/share/optmem)
+  repo/<owner>/<repo>/   one memory per project, same layout as memory/
 ```
 
 ```sh
@@ -54,18 +201,60 @@ recomputed.
 Records are fixed width, so position *is* identity and every lookup is one
 seek. At a million memories (608 MB), `wake` takes 0.03s.
 
-Set `$MEMORY_DIR` to keep `memory/` elsewhere — a synced folder, a git repo.
+Set `$MEMORY_DIR` to pin a single store and skip scoping — a synced folder, a
+git repo. See [WINDOWS.md](WINDOWS.md) for native PowerShell usage and locking
+details.
 
-## The prompt
+`LOG.txt` is the source of truth. `TREE/` is a rebuildable summary cache.
+Backing up the memory directories is sufficient; never hand-edit them while an
+agent may be writing.
 
-This is what the installer prints, and the whole of the integration.
+## Update, troubleshoot, and remove
+
+Re-run the installer to update. It replaces only the tool (and the Windows
+launcher), then runs the idempotent `memo init`; existing logs, summaries, and
+configuration remain untouched.
+
+Start troubleshooting with:
+
+```sh
+memo doctor
+memo --help
+```
+
+Common fixes:
+
+- `memo: command not found`: use `~/.optmem/memo`, or add `~/.optmem` to
+  `PATH`. On Windows use `& "$HOME\.optmem\memo.cmd"`.
+- The wrong project memory appears: run `memo doctor` and check the current
+  directory and Git origin.
+- No global memory exists: run `memo init`.
+- Fuzzy recall is unavailable: exact regex recall still works; install
+  `fff-search` under Python 3.10+ to enable it.
+- A command names `MEMORY_DIR`: verify that the environment variable points to
+  the intended existing store.
+
+To remove the executable while preserving all memories, delete only
+`~/.optmem/memo` and, on Windows, `~/.optmem/memo.cmd`. The global store lives
+at `~/.optmem/memory`; project stores live under
+`${XDG_DATA_HOME:-~/.local/share}/optmem`. Back them up before deleting any
+memory data.
+
+Developing or contributing? See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Agent instruction block (reference)
+
+The installer prints the authoritative block with the correct executable path
+for the current platform. The Unix form is shown here for review; copy the
+generated version rather than hand-editing this example.
 
 ```markdown
 ## Memory
 
 Your memory is OptMem:
 - The tool is `~/.optmem/memo`
-- Your memories are in `~/.optmem/memory`
+- Every project you work in has its own memory
+- One global memory, `~/.optmem/memory`, follows you into all of them
 
 OptMem outlives every session, compaction, model and vendor change.
 Without it you do not know who you are, or what was decided and tried.
@@ -73,7 +262,8 @@ Without it you do not know who you are, or what was decided and tried.
 ### At startup: activating OptMem (mandatory)
 
 Run `~/.optmem/memo wake` before any other tool call, in every session, and
-then do exactly what it prints, to the end of its output.
+then do exactly what it prints, to the end of its output. It reads the
+global memory first, then the memory of the project you are in.
 
 ### While working: register memories (mandatory)
 
@@ -82,15 +272,26 @@ something new, or something worth keeping happens. That covers a task
 worth real effort, a fact or insight the user teaches you, anything you
 learn about their life (even indirectly), any event of lasting effect.
 
+That writes to the memory of the project you are in, which is where
+almost everything belongs. Add `--global` ONLY if the memory would still
+be true tomorrow in a repository you have never seen: who the user is,
+how they want to be worked with, this machine, your own tooling. How one
+project does something is not global, however much it feels like a
+lesson -- write it to that project.
+
 Do not register redundant memories.
 
 If `~/.optmem/memo note` asks a compression: do it before your next action.
 
-Never edit or delete anything under `~/.optmem/memory`: the tool manages it.
+Never edit or delete a memory directory: the tool manages it.
 
 ### When you need an old memory: search, or navigate
 
-`~/.optmem/memo recall <regex>` searches every memory, word for word.
+`~/.optmem/memo recall <regex>` searches every memory, word for word and,
+when `fff-search` is installed, retries a zero-result search fuzzily. Use
+`~/.optmem/memo recall --fuzzy "<text>"` to request typo-tolerant FFF recall
+directly. Recall and `zoom` read the project memory; put `--global` first for
+the global one.
 
 Your memories also form a binary tree: #0-1, #2-3 ... exist as one-line
 summaries, pairs of those as #0-3, and so on -- every `#a-b` line wake
