@@ -168,9 +168,9 @@ directory. Run `memo doctor` whenever the selected scope is surprising.
 | `memo wake` | read both memories — global, then project; first command of every session |
 | `memo note "..."` | record one memory: one line, up to 280 chars (project by default) |
 | `memo nap` | answer the merges that came due |
-| `memo recall <regex>` | search every memory ever recorded, word for word |
-| `memo recall --fuzzy "<text>"` | typo-tolerant memory search with optional FFF |
-| `memo zoom <lo>-<hi>` | open a tree node into its two halves |
+| `memo recall [--limit N] [--context N] <regex>` | search the complete raw log while controlling matches and neighboring entries |
+| `memo recall --fuzzy [--limit N] [--context N] "<text>"` | typo-tolerant raw-memory search with optional FFF |
+| `memo zoom [--depth N] <lo>-<hi>` | open one to six levels of a summary-tree node |
 | `memo forget <lo>-<hi>` | drop a bad summary; the next nap rebuilds it |
 | `memo config [NAME=N]` | inspect or change the active store's reading/output limits |
 | `memo import <file>` | bootstrap an empty store from `YYYY-MM-DD <text>` lines |
@@ -179,6 +179,30 @@ directory. Run `memo doctor` whenever the selected scope is surprising.
 Put `--global` before any command to reach the memory that follows you into
 every project. Merges arrive one at a time, in the output of `note`. Nothing
 ever runs in the background.
+
+### Recall controls and tree depth
+
+Recall always searches the complete raw log. Its options control only what is
+returned:
+
+```sh
+memo recall --limit 5 "retry|backoff"
+memo recall --context 2 "migration failed"
+memo recall --fuzzy --limit 3 --context 1 "aproximate memry"
+```
+
+`--limit` keeps the newest exact matches or strongest fuzzy matches.
+`--context` includes that many adjacent raw memories on each side, merges
+overlapping windows, and marks actual matches with `>`.
+
+Tree depth belongs to `zoom`, not recall:
+
+```sh
+memo zoom --depth 3 0-255
+```
+
+Depth defaults to one and is capped at six so one command cannot flood an
+agent's context. Existing byte and line output limits still apply.
 
 ### Shell completion
 
@@ -373,12 +397,14 @@ Never edit or delete a memory directory: the tool manages it.
 `memo recall <regex>` searches raw memories, word for word and, when
 `fff-search` is installed, retries a zero-result search fuzzily. Use
 `memo recall --fuzzy "<text>"` to request typo-tolerant FFF recall
-directly. Recall and `zoom` read the project memory; put `--global`
-first for the global one.
+directly. Add `--limit N` to cap matched entries and `--context N` to
+include neighboring raw memories; neither makes the search less complete.
+Recall and `zoom` read the project memory; put `--global` first for global.
 
 A `#a-b` line from `wake` is one summary node covering raw memory IDs
-`a` through `b`. `memo zoom <a-b>` opens it into two child nodes;
-repeat until the relevant raw memories appear.
+`a` through `b`. `memo zoom <a-b>` opens one level; add `--depth N`
+to open up to six levels in one bounded call. Repeat until the relevant
+raw memories appear.
 
 ### If you're a subagent: skip everything above
 

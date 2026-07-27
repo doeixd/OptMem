@@ -149,6 +149,17 @@ memo recall "retry|backoff"
 memo --global recall "PowerShell"
 ```
 
+Recall always searches the full raw log. Control the returned material without
+reducing search coverage:
+
+```sh
+memo recall --limit 5 "retry|backoff"
+memo recall --context 2 "deployment failed"
+```
+
+`--limit` caps matched memories. `--context` includes neighboring raw entries,
+deduplicates overlapping windows, and marks the actual matches with `>`.
+
 With optional `fff-search` installed, a zero-result exact query retries
 fuzzily. Force typo-tolerant recall with:
 
@@ -160,10 +171,11 @@ Wake output may contain a summary such as `#128-255`. Open it without searching
 the full log:
 
 ```sh
-memo zoom 128-255
+memo zoom --depth 3 128-255
 ```
 
-Repeat `zoom` on the relevant half until the raw memories appear.
+Depth defaults to one and is capped at six. Repeat `zoom` on the relevant node
+until the raw memories appear.
 
 ## Parallel agents and subagents
 

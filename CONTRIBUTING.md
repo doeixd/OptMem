@@ -55,6 +55,10 @@ Please preserve these unless a change explicitly redesigns them:
   automatically.
 - `memo wake` must not claim the agent is awake until all pages and required
   compressions are complete.
+- Recall options may limit returned matches or add context, but must not
+  silently reduce raw-log search coverage. Context windows must deduplicate.
+- `zoom --depth` must preserve left-to-right tree order and remain within the
+  shared output limits.
 - Concurrent writers must receive unique IDs without losing records.
 - Re-running `memo init` or either installer must preserve memory data and
   user configuration.
@@ -147,5 +151,7 @@ import or required installer dependency.
   malformed files.
 - Test maintenance commands from an isolated fake home; never upgrade or
   uninstall the source checkout or the developer's real installation.
+- Test exact, fuzzy, limited, and contextual recall independently; test zoom
+  at its default and maximum supported depth.
 - Do not edit memory files in tests outside temporary directories.
 - Do not commit generated caches, test memories, or native wheels.

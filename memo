@@ -16,9 +16,10 @@ Start here:
 
 Remember and retrieve:
   {memo} note "<one line>"       save to this project's memory
-  {memo} recall <regex>          exact search across raw memories
-  {memo} recall --fuzzy <text>   typo-tolerant search with optional FFF
-  {memo} zoom <lo>-<hi>          open a summary into its two halves
+  {memo} recall [options] <query>
+                                 search raw memories with limit/context
+  {memo} zoom [--depth N] <range>
+                                 open one or more summary-tree levels
 
 Maintain:
   {memo} nap [id "..."]          complete a requested compression
@@ -104,6 +105,9 @@ PART_CHARS = KNOBS["PART_CHARS"][0]
 PART_LINES = KNOBS["PART_LINES"][0]
 
 RAW_MAX = 16  # blocks up to this many memories compress from the raw log
+MAX_RECALL_LIMIT = 1000
+MAX_RECALL_CONTEXT = 20
+MAX_ZOOM_DEPTH = 6
 
 
 # Records are FIXED WIDTH, so a memory or a block is found by seeking to its
@@ -640,12 +644,14 @@ Never edit or delete a memory directory: the tool manages it.
 `{memo} recall <regex>` searches raw memories, word for word and, when
 `fff-search` is installed, retries a zero-result search fuzzily. Use
 `{memo} recall --fuzzy "<text>"` to request typo-tolerant FFF recall
-directly. Recall and `zoom` read the project memory; put `--global`
-first for the global one.
+directly. Add `--limit N` to cap matched entries and `--context N` to
+include neighboring raw memories; neither makes the search less complete.
+Recall and `zoom` read the project memory; put `--global` first for global.
 
 A `#a-b` line from `wake` is one summary node covering raw memory IDs
-`a` through `b`. `{memo} zoom <a-b>` opens it into two child nodes;
-repeat until the relevant raw memories appear.
+`a` through `b`. `{memo} zoom <a-b>` opens one level; add `--depth N`
+to open up to six levels in one bounded call. Repeat until the relevant
+raw memories appear.
 
 ### If you're a subagent: skip everything above
 
@@ -693,7 +699,10 @@ _memo_completion() {
             _memo_compgen -W "bash zsh fish powershell" -- "$cur"
             ;;
         recall)
-            _memo_compgen -W "--fuzzy" -- "$cur"
+            _memo_compgen -W "--fuzzy --limit --context" -- "$cur"
+            ;;
+        zoom)
+            _memo_compgen -W "--depth" -- "$cur"
             ;;
         config)
             _memo_compgen -W "WAKE_LINES= ENTRY_CHARS= PART_CHARS= PART_LINES=" -- "$cur"
@@ -744,7 +753,15 @@ _memo() {
                 '--no-create[skip missing files]' '*:instruction file:_files'
             ;;
         completion) _values 'shell' bash zsh fish powershell ;;
-        recall) _arguments '--fuzzy[use typo-tolerant FFF recall]' '*:query:' ;;
+        recall)
+            _arguments '--fuzzy[use typo-tolerant FFF recall]' \
+                '--limit=[maximum matching memories]:count:' \
+                '--context=[neighboring memories on each side]:count:' \
+                '*:query:'
+            ;;
+        zoom)
+            _arguments '--depth=[tree levels to open]:depth:' '1:block id:'
+            ;;
         config)
             _values 'setting' 'WAKE_LINES=' 'ENTRY_CHARS=' 'PART_CHARS=' 'PART_LINES='
             ;;
@@ -783,6 +800,9 @@ complete -c memo -n 'contains -- setup (commandline -opc)' -l create -d 'Create 
 complete -c memo -n 'contains -- setup (commandline -opc)' -l no-create -d 'Skip missing files'
 complete -c memo -n 'contains -- completion (commandline -opc)' -a 'bash zsh fish powershell'
 complete -c memo -n 'contains -- recall (commandline -opc)' -l fuzzy -d 'Use typo-tolerant FFF recall'
+complete -c memo -n 'contains -- recall (commandline -opc)' -l limit -r -d 'Maximum matching memories'
+complete -c memo -n 'contains -- recall (commandline -opc)' -l context -r -d 'Neighboring memories on each side'
+complete -c memo -n 'contains -- zoom (commandline -opc)' -l depth -r -d 'Tree levels to open'
 complete -c memo -n 'contains -- config (commandline -opc)' -a 'WAKE_LINES= ENTRY_CHARS= PART_CHARS= PART_LINES='""",
     "powershell": r"""# PowerShell completion for memo
 Register-ArgumentCompleter -Native -CommandName memo -ScriptBlock {
@@ -816,7 +836,8 @@ Register-ArgumentCompleter -Native -CommandName memo -ScriptBlock {
         $candidates = switch ($command) {
             setup      { '--create', '--no-create' }
             completion { 'bash', 'zsh', 'fish', 'powershell' }
-            recall     { '--fuzzy' }
+            recall     { '--fuzzy', '--limit', '--context' }
+            zoom       { '--depth' }
             config     { 'WAKE_LINES=', 'ENTRY_CHARS=', 'PART_CHARS=', 'PART_LINES=' }
             default    { @() }
         }
@@ -1475,7 +1496,7 @@ def cmd_forget(d, args):
           % (plural(len(gone), "summary"), gone[0][0], gone[0][1] - 1, ME))
 
 
-def fff_recall(d, query):
+def fff_recall(d, query, limit=None):
     """The strongest typo-tolerant matches from LOG.txt, or (None, reason)
     when the optional Python 3.10+ FFF binding is unavailable or failed."""
     try:
@@ -1485,6 +1506,7 @@ def fff_recall(d, query):
 
     try:
         path = log_path(d)
+        requested = min(max(limit or 100, 100), MAX_RECALL_LIMIT)
         # One FileFinder lives for this command: FFF improves match quality
         # here; a one-shot CLI cannot claim its long-lived warm-index speedup.
         with FileFinder(d, watch=False) as finder:
@@ -1493,7 +1515,8 @@ def fff_recall(d, query):
             result = finder.grep(
                 query, mode="fuzzy",
                 max_file_size=max(os.path.getsize(path) + 1, LOG_REC),
-                max_matches_per_file=512, page_limit=100)
+                max_matches_per_file=max(512, requested),
+                page_limit=requested)
     except Exception as e:
         return None, str(e)
 
@@ -1513,24 +1536,128 @@ def fff_recall(d, query):
             break
         out.append(line)
         size += n
+        if limit is not None and len(out) >= limit:
+            break
     return out, None
 
 
+def _number_option(name, value, low, high):
+    if not value.isdigit() or not low <= int(value) <= high:
+        die("%s must be a whole number from %d to %d, not '%s'."
+            % (name, low, high, value))
+    return int(value)
+
+
+def _recall_args(args):
+    fuzzy, limit, context, query, i = False, None, 0, [], 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            query.extend(args[i + 1:])
+            break
+        if arg == "--fuzzy":
+            fuzzy = True
+        elif arg in ("--limit", "--context"):
+            if i + 1 >= len(args):
+                die("%s needs a number." % arg)
+            i += 1
+            if arg == "--limit":
+                limit = _number_option(
+                    "--limit", args[i], 1, MAX_RECALL_LIMIT)
+            else:
+                context = _number_option(
+                    "--context", args[i], 0, MAX_RECALL_CONTEXT)
+        elif arg.startswith("--limit="):
+            limit = _number_option(
+                "--limit", arg.partition("=")[2], 1, MAX_RECALL_LIMIT)
+        elif arg.startswith("--context="):
+            context = _number_option(
+                "--context", arg.partition("=")[2], 0, MAX_RECALL_CONTEXT)
+        elif arg.startswith("--"):
+            die("Unknown recall option: %s." % arg)
+        else:
+            query.append(arg)
+        i += 1
+    if len(query) != 1:
+        die("usage: %s recall [--fuzzy] [--limit N] [--context N] "
+            "<query>" % ME)
+    return fuzzy, limit, context, query[0]
+
+
+def _memory_id(line):
+    match = re.match(r"^#(\d+) ", line)
+    return int(match.group(1)) if match else None
+
+
+def _context_output(d, matches, radius, ranked=False):
+    """Render deduplicated neighboring raw memories, marking every match."""
+    if not radius:
+        return list(matches)
+    hit_ids = {_memory_id(line) for line in matches}
+    hit_ids.discard(None)
+    T, ordered, seen = log_len(d), [], set()
+    if ranked:
+        for line in matches:
+            center = _memory_id(line)
+            if center is None:
+                continue
+            for i in range(max(0, center - radius),
+                           min(T, center + radius + 1)):
+                if i not in seen:
+                    seen.add(i)
+                    ordered.append(i)
+    else:
+        for center in hit_ids:
+            seen.update(range(max(0, center - radius),
+                              min(T, center + radius + 1)))
+        ordered = sorted(seen)
+    out = []
+    for i in ordered:
+        memory = log_get(d, i)
+        out.append("%s #%d %s %s" %
+                   (">" if i in hit_ids else " ", memory[0],
+                    memory[1], memory[2]))
+    return out
+
+
+def _output_size(lines):
+    return sum(len(line.encode()) + 1 for line in lines)
+
+
+def _fit_context(d, matches, radius, ranked):
+    """Drop least useful matches until their deduplicated context fits."""
+    matches = deque(matches)
+    rendered = _context_output(d, matches, radius, ranked)
+    while len(matches) > 1 and _output_size(rendered) > PART_CHARS:
+        if ranked:
+            matches.pop()       # weakest fuzzy match
+        else:
+            matches.popleft()   # oldest exact match
+        rendered = _context_output(d, matches, radius, ranked)
+    return list(matches), rendered
+
+
+def _print_fuzzy(d, out, limit, context):
+    selected = list(out[:limit] if limit is not None else out)
+    selected, rendered = _fit_context(d, selected, context, ranked=True)
+    print("\n".join(rendered))
+    detail = "FFF, strongest first"
+    if context:
+        detail += "; context deduplicated, matches marked >"
+    print("%s (%s)." % (plural(len(selected), "fuzzy match"), detail))
+
+
 def cmd_recall(d, args):
-    fuzzy = len(args) == 2 and args[0] == "--fuzzy"
-    if not (len(args) == 1 or fuzzy):
-        die("usage: %s recall [--fuzzy] <query>" % ME)
-    query = args[-1]
+    fuzzy, limit, context, query = _recall_args(args)
     if fuzzy:
-        out, error = fff_recall(d, query)
+        out, error = fff_recall(d, query, limit)
         if out is None:
             die("FFF fuzzy recall failed: %s.\nInstall on Python 3.10+ with: "
                 "%s -m pip install fff-search" % (error, sys.executable))
         if not out:
             print("No fuzzy match.")
             return
-        print("\n".join(out))
-        print("%s (FFF, strongest first)." % plural(len(out), "fuzzy match"))
+        _print_fuzzy(d, out, limit, context)
         return
     try:
         pat = re.compile(query, re.I)
@@ -1547,46 +1674,79 @@ def cmd_recall(d, args):
         hits += 1
         out.append(line)
         size += len(line.encode()) + 1
-        while size > PART_CHARS:
+        while ((limit is not None and len(out) > limit) or
+               size > PART_CHARS):
             size -= len(out.popleft().encode()) + 1
     if not hits:
-        fuzzy_out, _ = fff_recall(d, query)
+        fuzzy_out, _ = fff_recall(d, query, limit)
         if fuzzy_out:
             print("No exact match. FFF fuzzy matches, strongest first:")
-            print("\n".join(fuzzy_out))
-            print("%s." % plural(len(fuzzy_out), "fuzzy match"))
+            _print_fuzzy(d, fuzzy_out, limit, context)
             return
         print("No match.")
         return
-    print("\n".join(out))
-    if len(out) < hits:
-        print("Newest %d of %s. Narrow the regex."
-              % (len(out), plural(hits, "match")))
+    selected, rendered = _fit_context(d, out, context, ranked=False)
+    print("\n".join(rendered))
+    if len(selected) < hits:
+        reason = " (--limit %d/output cap)" % limit if limit else ""
+        print("Newest %d of %s%s. Narrow the regex or adjust --limit."
+              % (len(selected), plural(hits, "match"), reason))
     else:
         print("%s." % plural(hits, "match"))
+    if context:
+        print("Context: up to %d %s on each side; matches marked >."
+              % (context, "memory" if context == 1 else "memories"))
 
 
 def cmd_zoom(d, args):
     """One node of the tree, opened: its two halves, each rendered as wake
     renders it -- a summary, or the raw memory once a half is single. The
     navigating intelligence is the agent's; the tool only reads."""
-    if len(args) != 1:
-        die("usage: %s zoom <lo>-<hi>   # a block id, as wake prints them"
-            % ME)
-    lo, hi = block_id(args[0])
+    depth, block, i = 1, [], 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--depth":
+            if i + 1 >= len(args):
+                die("--depth needs a number.")
+            i += 1
+            depth = _number_option(
+                "--depth", args[i], 1, MAX_ZOOM_DEPTH)
+        elif arg.startswith("--depth="):
+            depth = _number_option(
+                "--depth", arg.partition("=")[2], 1, MAX_ZOOM_DEPTH)
+        elif arg.startswith("--"):
+            die("Unknown zoom option: %s." % arg)
+        else:
+            block.append(arg)
+        i += 1
+    if len(block) != 1:
+        die("usage: %s zoom [--depth N] <lo>-<hi>   # N from 1 to %d"
+            % (ME, MAX_ZOOM_DEPTH))
+    lo, hi = block_id(block[0])
     T = log_len(d)
     if lo >= T:
         die("#%s is beyond the memory: it holds %s. Run: %s wake"
-            % (args[0], plural(T, "memory"), ME))
-    mid = (lo + hi) // 2
-    for a, b in ((lo, mid), (mid, hi)):
+            % (block[0], plural(T, "memory"), ME))
+    lines = []
+
+    def descend(a, b, remaining):
         if a >= T:
-            continue  # the future: no memories there yet
+            return  # the future: no memories there yet
         if b - a == 1:
-            print("#%d %s %s" % log_get(d, a))
+            lines.append("#%d %s %s" % log_get(d, a))
+        elif remaining:
+            mid = (a + b) // 2
+            descend(a, mid, remaining - 1)
+            descend(mid, b, remaining - 1)
         else:
-            print("#%d-%d %s" % (a, b - 1, tree_get(d, a, b)
-                                 or "not compressed yet"))
+            lines.append("#%d-%d %s" % (
+                a, b - 1, tree_get(d, a, b) or "not compressed yet"))
+
+    descend(lo, hi, depth)
+    if _output_size(lines) > PART_CHARS or len(lines) > PART_LINES:
+        die("Depth %d exceeds the output limit for #%s. Retry with "
+            "--depth %d." % (depth, block[0], depth - 1))
+    print("\n".join(lines))
 
 
 def cmd_import(d, args):

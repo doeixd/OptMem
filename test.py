@@ -172,7 +172,7 @@ check(helped.returncode == 0 and "Usage:" in helped.stdout
       and "setup [--create|--no-create] [FILE ...]" in helped.stdout
       and "completion <shell>" in helped.stdout
       and "upgrade" in helped.stdout and "uninstall" in helped.stdout
-      and "doctor" in helped.stdout and "recall --fuzzy" in helped.stdout,
+      and "doctor" in helped.stdout and "recall [options]" in helped.stdout,
       "--help is not a useful command overview:\n" + helped.stdout + helped.stderr)
 help_alias = subprocess.run(memo + ["help"], capture_output=True, text=True,
                             env=fresh)
@@ -192,6 +192,9 @@ for shell, signature in completion_signatures.items():
           % (shell, completed.stdout, completed.stderr))
     check("upgrade" in completed.stdout and "uninstall" in completed.stdout,
           "%s completion omits maintenance commands" % shell)
+    check("limit" in completed.stdout and "context" in completed.stdout
+          and "depth" in completed.stdout,
+          "%s completion omits recall/zoom controls" % shell)
 bad_completion = subprocess.run(memo + ["completion", "tcsh"],
                                 capture_output=True, text=True, env=fresh)
 check(bad_completion.returncode == 1
@@ -631,20 +634,52 @@ r = run("recall", "2020-01-02")
 check("#7 " in r.stdout and "5 matches." in r.stdout,
       "recall cannot find memories by date: " + r.stdout)
 
+# Limit caps matching entries without reducing search coverage; context adds
+# deduplicated neighboring raw memories and clearly marks the actual hits.
+r = run("recall", "--limit", "3", "memory number")
+limited = [line for line in r.stdout.splitlines() if line.startswith("#")]
+check([int(line.split()[0][1:]) for line in limited] == [N - 3, N - 2, N - 1]
+      and "--limit 3" in r.stdout,
+      "recall --limit did not keep the newest three matches:\n" + r.stdout)
+r = run("recall", "--context", "2", "^#7 ")
+context_lines = [line for line in r.stdout.splitlines()
+                 if re.match(r"[ >] #\d+ ", line)]
+check(len(context_lines) == 5
+      and context_lines[0].startswith("  #5 ")
+      and context_lines[2].startswith("> #7 ")
+      and context_lines[-1].startswith("  #9 ")
+      and "Context: up to 2 memories" in r.stdout,
+      "recall --context did not surround and mark one hit:\n" + r.stdout)
+r = run("recall", "--context=2", r"^#(?:7|9) ")
+context_lines = [line for line in r.stdout.splitlines()
+                 if re.match(r"[ >] #\d+ ", line)]
+check(len(context_lines) == 7
+      and sum(line.startswith("> ") for line in context_lines) == 2,
+      "overlapping recall context was not deduplicated:\n" + r.stdout)
+check(run("recall", "--limit", "0", "x").returncode == 1,
+      "recall accepted a zero result limit")
+check(run("recall", "--context", "21", "x").returncode == 1,
+      "recall accepted excessive context")
+
 # FFF is optional: exact recall stays dependency-free, while explicit fuzzy
 # recall and zero-result fallback consume its strongest-first raw-memory lines.
 real_fff_recall = cli.fff_recall
 fuzzy_line = "#7 2020-01-02 memory number 7, a thing that happened"
-cli.fff_recall = lambda store, query: ([fuzzy_line], None)
+cli.fff_recall = lambda store, query, limit=None: ([fuzzy_line], None)
 r = run("recall", "--fuzzy", "memry numbr sevn")
 check(r.returncode == 0 and fuzzy_line in r.stdout
       and "FFF, strongest first" in r.stdout,
       "explicit FFF recall did not render its result: " + r.stdout + r.stderr)
+r = run("recall", "--fuzzy", "--context", "1", "memry numbr sevn")
+check("> #7 " in r.stdout and "  #6 " in r.stdout and "  #8 " in r.stdout
+      and "context deduplicated" in r.stdout,
+      "fuzzy recall context did not render neighboring raw memories:\n"
+      + r.stdout)
 r = run("recall", "definitely absent exact phrase")
 check(r.returncode == 0 and "No exact match" in r.stdout
       and fuzzy_line in r.stdout,
       "zero exact results did not fall back to FFF: " + r.stdout + r.stderr)
-cli.fff_recall = lambda store, query: (None, "not installed")
+cli.fff_recall = lambda store, query, limit=None: (None, "not installed")
 r = run("recall", "--fuzzy", "anything")
 check(r.returncode == 1 and "pip install fff-search" in r.stderr,
       "forced FFF recall did not explain how to enable it: " + r.stderr)
@@ -678,6 +713,22 @@ check(lo == target and calls == 10,
       "halving 1024 memories took %d calls and landed on #%d" % (calls, lo))
 check("memory number %d," % target in run("zoom", "776-777").stdout,
       "the last zoom must print the raw memories themselves")
+
+# Optional depth opens several tree levels in one bounded call; depth 1 is
+# still the original two-child behavior.
+r = run("zoom", "--depth", "2", "0-3")
+deep_lines = [line for line in r.stdout.splitlines() if line.startswith("#")]
+check(len(deep_lines) == 4
+      and [int(line.split()[0][1:]) for line in deep_lines] == list(range(4)),
+      "zoom --depth 2 did not reach four raw memories:\n" + r.stdout)
+r = run("zoom", "--depth=6", "0-63")
+check(len([line for line in r.stdout.splitlines()
+           if line.startswith("#")]) == 64,
+      "maximum zoom depth did not produce 64 leaves")
+check(run("zoom", "--depth", "0", "0-3").returncode == 1,
+      "zoom accepted depth zero")
+check(run("zoom", "--depth", "7", "0-127").returncode == 1,
+      "zoom accepted an unsafe depth")
 
 # the unbuilt tail is named, the empty future is omitted
 r = run("zoom", "1024-2047")  # T is N+1, so the right half has no summary

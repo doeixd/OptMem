@@ -77,6 +77,8 @@ The installer makes the short command available:
 memo wake
 memo note "first project memory"
 memo --global note "true in every project"
+memo recall --limit 5 --context 2 "deployment"
+memo zoom --depth 3 0-255
 ```
 
 The launcher path remains a reliable fallback:
