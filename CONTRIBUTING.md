@@ -37,6 +37,7 @@ py -3 test.py
 - `install.sh` — Linux/macOS installer.
 - `install.ps1` and `memo.cmd` — native Windows installer and launcher.
 - `README.md` — first-run and command documentation.
+- `CHANGELOG.md` — user-facing release history.
 - `AGENT_SETUP.md` — operational guidance for agents.
 - `WINDOWS.md` — Windows-specific setup and locking details.
 
@@ -83,6 +84,8 @@ Please preserve these unless a change explicitly redesigns them:
   dependency-free `memo completion` command; installer registration must be
   idempotent.
 - `memo upgrade` may replace only the installed copy after validation.
+  Installers and upgrades consume assets from the latest tagged GitHub
+  release; the raw `main` installer is only the bootstrap entrypoint.
   `memo uninstall` must remove only installed executables and managed shell
   integration; global and project memories are never uninstall targets.
 - `memo setup` must preserve non-OptMem instructions, remain byte-for-byte
@@ -154,6 +157,17 @@ python3 memo recall --fuzzy "windws loking msvrt"
 
 Use an isolated environment for dependency testing; FFF must not become a core
 import or required installer dependency.
+
+## Cutting a release
+
+1. Update `VERSION` in `memo` and add the matching entry to `CHANGELOG.md`.
+2. Run the complete validation above and commit the exact release state.
+3. Tag it `v<VERSION>`.
+4. Publish `memo`, `memo.cmd`, `install.sh`, `install.ps1`, and a SHA-256
+   checksum manifest as release assets. Installers and `memo upgrade` resolve
+   those filenames through GitHub's latest-release URL.
+5. Verify `memo --version` from the published `memo` asset before announcing
+   the release.
 
 ## Change checklist
 

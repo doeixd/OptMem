@@ -5,6 +5,7 @@ Usage:
   {memo} [--global] <command> [arguments]
 
 Start here:
+  {memo} version                 print the installed OptMem version
   {memo} init                    create global memory; print agent instructions
   {memo} setup [--create|--no-create] [FILE ...]
                                  update AGENTS.md and CLAUDE.md safely
@@ -95,7 +96,8 @@ ME = TOOL
 
 # The memory that follows you everywhere, as opposed to the one per project.
 GLOBAL = "~/.optmem/memory"
-INSTALL_BASE = "https://raw.githubusercontent.com/doeixd/OptMem/main"
+VERSION = "1.0.0"
+INSTALL_BASE = "https://github.com/doeixd/OptMem/releases/latest/download"
 SCOPE_GLOBAL = False  # set by main() from `--global`
 
 # The sizes a memory may override in its own `config` file: the default, and
@@ -121,6 +123,8 @@ MAX_RECALL_LIMIT = 1000
 MAX_RECALL_CONTEXT = 20
 MAX_ZOOM_DEPTH = 6
 MAX_SHOW_REFERENCES = 50
+MAX_NAP_BATCH = 64
+MAX_NAP_APPLY_BYTES = 100000
 QMD_SEGMENT_SIZE = 16
 QMD_INDEX = "optmem"
 QMD_QUERY_SEGMENTS = 3
@@ -699,6 +703,8 @@ def tree_invalidate_memory(d, ident):
                             for item in range(index, records_))
                 with open(path, "r+b") as output:
                     output.truncate(index * TREE_REC)
+                    output.flush()
+                    os.fsync(output.fileno())
         return gone
     finally:
         lock.close()
@@ -901,6 +907,18 @@ def batch_nap_prompt(d, jobs, left):
     return "\n".join(lines)
 
 
+def fitted_batch_prompt(d, T, requested):
+    jobs = batch_pending(d, T, requested)
+    total = pending_count(d, T)
+    while jobs:
+        prompt = batch_nap_prompt(d, jobs, total - len(jobs))
+        if (len(prompt.encode("utf-8")) <= PART_CHARS and
+                len(prompt.splitlines()) <= PART_LINES):
+            return jobs, prompt
+        jobs.pop()
+    return [], None
+
+
 # ---------------------------------------------------------------- commands
 
 TEMPLATE = """\
@@ -1020,7 +1038,7 @@ _memo_completion() {
     done
 
     if [ -z "$cmd" ]; then
-        _memo_compgen -W "--global init setup completion upgrade uninstall doctor qmd wake note show amend retract recall zoom nap resummarize forget redact config export import" -- "$cur"
+        _memo_compgen -W "--global version init setup completion upgrade uninstall doctor qmd wake note show amend retract recall zoom nap resummarize forget redact config export import" -- "$cur"
         return
     fi
     case "$cmd" in
@@ -1088,6 +1106,7 @@ _memo() {
     local cmd word state
     local -a commands
     commands=(
+        'version:print the installed OptMem version'
         'init:create global memory and print agent instructions'
         'setup:add or update agent instruction files'
         'completion:print a shell completion script'
@@ -1179,6 +1198,7 @@ function __memo_needs_command
 end
 
 complete -c memo -n __memo_needs_command -l global -d 'Use global memory'
+complete -c memo -n __memo_needs_command -a version -d 'Print the installed OptMem version'
 complete -c memo -n __memo_needs_command -a init -d 'Create global memory and print instructions'
 complete -c memo -n __memo_needs_command -a setup -d 'Add or update agent instruction files'
 complete -c memo -n __memo_needs_command -a completion -d 'Print a shell completion script'
@@ -1224,6 +1244,7 @@ Register-ArgumentCompleter -Native -CommandName memo -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
 
     $commands = [ordered]@{
+        version    = 'Print the installed OptMem version'
         init       = 'Create global memory and print agent instructions'
         setup      = 'Add or update agent instruction files'
         completion = 'Print a shell completion script'
@@ -1463,6 +1484,12 @@ def cmd_completion(d, args):
     if len(args) != 1 or args[0].lower() not in COMPLETIONS:
         die("Usage: %s completion <bash|zsh|fish|powershell>" % TOOL)
     print(COMPLETIONS[args[0].lower()].rstrip())
+
+
+def cmd_version(d, args):
+    if args:
+        die("Usage: %s version" % TOOL)
+    print("OptMem %s" % VERSION)
 
 
 def _install_dir():
@@ -1909,6 +1936,9 @@ def cmd_retract(d, args):
 
 
 def _nap_apply(d, path):
+    if os.path.getsize(path) > MAX_NAP_APPLY_BYTES:
+        die("%s is too large for a nap batch (limit %d bytes)."
+            % (pretty(path), MAX_NAP_APPLY_BYTES))
     try:
         source = open(path, encoding="utf-8").read().splitlines()
     except UnicodeDecodeError:
@@ -1922,6 +1952,8 @@ def _nap_apply(d, path):
             die("line %d: expected <range><TAB><one-line summary>." % number)
         lo, hi = block_id(block.strip())
         rows.append((lo, hi, check(summary)))
+        if len(rows) > MAX_NAP_BATCH:
+            die("A nap batch holds at most %d summaries." % MAX_NAP_BATCH)
     if not rows:
         die("%s has no summaries." % pretty(path))
     T = log_len(d)
@@ -1949,14 +1981,16 @@ def cmd_nap(d, args):
     T, said = log_len(d), False
     if args and args[0] == "--batch":
         if (len(args) != 2 or not args[1].isdigit() or
-                not 1 <= int(args[1]) <= 64):
-            die("usage: %s nap --batch <1-64>" % ME)
-        jobs = batch_pending(d, T, int(args[1]))
+                not 1 <= int(args[1]) <= MAX_NAP_BATCH):
+            die("usage: %s nap --batch <1-%d>" % (ME, MAX_NAP_BATCH))
+        jobs, prompt = fitted_batch_prompt(d, T, int(args[1]))
         if not jobs:
+            if pending_count(d, T):
+                die("The current PART_CHARS/PART_LINES budget cannot fit one "
+                    "batch job. Run: %s nap" % ME)
             print("Nothing left to compress.")
             return
-        print(batch_nap_prompt(
-            d, jobs, pending_count(d, T) - len(jobs)))
+        print(prompt)
         return
     if args and args[0] == "--apply":
         if len(args) != 2:
@@ -2529,9 +2563,7 @@ def cmd_redact(d, args):
     result = log_redact(d, ident)
     if result is None:
         die("No memory #%d." % ident)
-    if not result[3]:
-        print("#%d is already redacted." % ident)
-        return
+    newly_redacted = result[3]
 
     total = log_len(d)
     warnings = []
@@ -2551,7 +2583,10 @@ def cmd_redact(d, args):
         except (QmdError, OSError) as e:
             warnings.append("QMD rebuild: " + str(e))
 
-    print("Redacted #%d. Its ID and date are preserved." % ident)
+    if newly_redacted:
+        print("Redacted #%d. Its ID and date are preserved." % ident)
+    else:
+        print("#%d was already redacted; rechecked its derived caches." % ident)
     if gone:
         print("Invalidated %s. Run: %s nap --batch 8"
               % (plural(len(gone), "summary"), ME))
@@ -3083,6 +3118,8 @@ def memory_status(d):
     if not os.path.isdir(d):
         return "not created"
     p = log_path(d)
+    if os.path.islink(p):
+        return "LOG.txt is a symbolic link"
     if not os.path.isfile(p):
         return "directory exists, but LOG.txt is missing"
     size = os.path.getsize(p)
@@ -3117,6 +3154,8 @@ def _verify_store(d):
     if not os.path.isdir(d):
         return ["store does not exist: %s" % pretty(d)], warnings, 0, 0
     path = log_path(d)
+    if os.path.islink(path):
+        return ["LOG.txt is a symbolic link"], warnings, 0, 0
     if not os.path.isfile(path):
         return ["LOG.txt is missing"], warnings, 0, 0
     raw_size = os.path.getsize(path)
@@ -3270,6 +3309,7 @@ def cmd_doctor(d, args):
               "none; using checkout path")
     on_path = bool(shutil.which("memo") or shutil.which("memo.cmd"))
     print("OptMem doctor")
+    print("  Version:       %s" % VERSION)
     print("  Tool:          %s" % pretty(__file__))
     print("  Python:        %s" % sys.version.split()[0])
     print("  On PATH:       %s (optional)" % ("yes" if on_path else "no"))
@@ -3320,7 +3360,7 @@ def cmd_doctor(d, args):
         print("use the full path shown above. Generated instructions already do.")
 
 
-COMMANDS = {"init": cmd_init, "setup": cmd_setup,
+COMMANDS = {"version": cmd_version, "init": cmd_init, "setup": cmd_setup,
             "completion": cmd_completion, "upgrade": cmd_upgrade,
             "uninstall": cmd_uninstall, "qmd": cmd_qmd, "wake": cmd_wake,
             "note": cmd_note, "show": cmd_show, "amend": cmd_amend,
@@ -3345,6 +3385,9 @@ def main():
         # Every command printed by this scope must return to the same scope.
         ME = TOOL + " --global"
     usage = __doc__.strip().format(memo=TOOL)
+    if argv == ["--version"]:
+        cmd_version(None, [])
+        return
     if not argv or argv[0] in ("help", "--help", "-h"):
         print(usage)
         sys.exit(0)
@@ -3358,6 +3401,9 @@ def main():
         # `init` is the only command that may run without an existing memory:
         # it is the one that creates it. Every other command refuses, so a
         # typo in MEMORY_DIR is an error instead of a second, empty identity.
+        if cmd == "version":
+            cmd_version(None, argv[1:])
+            return
         if cmd == "init":
             # A bare init creates the one global identity. Project stores need
             # no ceremony and appear on first use.

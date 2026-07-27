@@ -63,6 +63,7 @@ memo setup .\AGENTS.md
 
 ```powershell
 memo doctor
+memo --version
 ```
 
 `doctor` shows the executable, Python version, current Git origin, active

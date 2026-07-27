@@ -5,7 +5,7 @@
 
 $ErrorActionPreference = 'Stop'
 $InstallDir = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.optmem'
-$BaseUrl = 'https://raw.githubusercontent.com/doeixd/OptMem/main'
+$BaseUrl = 'https://github.com/doeixd/OptMem/releases/latest/download'
 
 $Py = Get-Command py -ErrorAction SilentlyContinue
 $Python = Get-Command python -ErrorAction SilentlyContinue

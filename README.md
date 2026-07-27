@@ -11,6 +11,7 @@ package.
 This fork builds on [VictorTaelin/OptMem](https://github.com/VictorTaelin/OptMem)
 and adds project-scoped memory, native Windows support, optional FFF recall,
 optional QMD semantic recall, and a polished agent/install workflow.
+See the [changelog](CHANGELOG.md) for release history.
 
 ![how OptMem works](anim/optmem.gif)
 
@@ -175,10 +176,11 @@ falls back to the current directory.
 
 | Command | Purpose |
 |---|---|
+| `memo version` / `memo --version` | print the installed OptMem release |
 | `memo init` | create the global memory and print the current agent instructions |
 | `memo setup [--create\|--no-create] [FILE ...]` | update instructions in existing files; defaults to `AGENTS.md` and `CLAUDE.md`, with creation opt-in |
 | `memo completion <shell>` | print completion for Bash, Zsh, Fish, or PowerShell |
-| `memo upgrade` | download the latest release, validate it, and refresh PATH/completion setup |
+| `memo upgrade` | install the latest GitHub release, validate it, and refresh PATH/completion setup |
 | `memo uninstall` | remove the command and shell integration while preserving every memory |
 | `memo doctor [--deep]` | explain setup and scope; optionally verify the raw log, tree, lifecycle references, and QMD projection state |
 | `memo qmd enable` | explicitly enable optional QMD semantic recall for this scope |

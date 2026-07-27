@@ -8,7 +8,7 @@
 
 set -eu
 DIR="$HOME/.optmem"
-URL="https://raw.githubusercontent.com/doeixd/OptMem/main/memo"
+URL="https://github.com/doeixd/OptMem/releases/latest/download/memo"
 NEW="$DIR/memo.new"
 
 command -v python3 >/dev/null || {

@@ -191,6 +191,14 @@ check(helped.returncode == 0 and "Usage:" in helped.stdout
       and "resummarize" in helped.stdout and "export [--with-ids]" in
           helped.stdout,
       "--help is not a useful command overview:\n" + helped.stdout + helped.stderr)
+versioned = subprocess.run(memo + ["--version"], capture_output=True, text=True,
+                           env=fresh)
+version_command = subprocess.run(memo + ["version"], capture_output=True,
+                                 text=True, env=fresh)
+check(versioned.returncode == 0
+      and versioned.stdout.strip() == "OptMem " + cli.VERSION
+      and version_command.stdout == versioned.stdout,
+      "version command/flag is missing or inconsistent")
 help_alias = subprocess.run(memo + ["help"], capture_output=True, text=True,
                             env=fresh)
 check(help_alias.returncode == 0 and help_alias.stdout == helped.stdout,
@@ -209,6 +217,8 @@ for shell, signature in completion_signatures.items():
           % (shell, completed.stdout, completed.stderr))
     check("upgrade" in completed.stdout and "uninstall" in completed.stdout,
           "%s completion omits maintenance commands" % shell)
+    check("version" in completed.stdout,
+          "%s completion omits the version command" % shell)
     check("limit" in completed.stdout and "context" in completed.stdout
           and "depth" in completed.stdout and "semantic" in completed.stdout
           and "fast" in completed.stdout and "qmd" in completed.stdout
@@ -435,6 +445,12 @@ maintenance_env = dict(
 
 # Exercise the full upgrade downloader/runner against a local authoritative
 # installer, never the network or the developer's real installation.
+check("releases/latest/download/memo" in open(
+          os.path.join(HERE, "install.sh"), encoding="utf-8").read()
+      and "releases/latest/download" in open(
+          os.path.join(HERE, "install.ps1"), encoding="utf-8").read()
+      and "releases/latest/download" in cli.INSTALL_BASE,
+      "install or upgrade still consumes mutable main-branch payloads")
 fake_release = tempfile.mkdtemp(prefix="optmem-release-")
 upgrade_marker = os.path.join(fake_release, "UPGRADED")
 if os.name == "nt":
@@ -853,6 +869,20 @@ bad_errors, _, _, _ = cli._verify_store(bad_store)
 check(any("forward or to itself" in problem for problem in bad_errors),
       "deep verification missed an invalid lifecycle reference")
 
+link_store = tempfile.mkdtemp(prefix="optmem-link-store-")
+os.makedirs(os.path.join(link_store, "TREE"))
+link_tested = False
+try:
+    os.symlink(portable, os.path.join(link_store, "LOG.txt"))
+    link_tested = True
+except (OSError, NotImplementedError):
+    pass
+if link_tested:
+    link_errors, _, _, _ = cli._verify_store(link_store)
+    check(link_errors == ["LOG.txt is a symbolic link"]
+          and "symbolic link" in cli.memory_status(link_store),
+          "deep verification followed a symbolic-link authoritative log")
+
 # A batch contains one dense run at the smallest pending level. Applying is
 # all-or-nothing and one fsync, so large imports need far fewer agent turns.
 batch = run("nap", "--batch", "3", store=restored)
@@ -876,6 +906,27 @@ applied = run("nap", "--apply", batch_file, store=restored)
 check(applied.returncode == 0
       and cli.count(cli.tree_path(restored, 2), cli.TREE_REC) == 2,
       "nap --apply did not atomically save the batch")
+
+batch_budget = tempfile.mkdtemp(prefix="optmem-batch-budget-")
+os.makedirs(os.path.join(batch_budget, "TREE"))
+open(os.path.join(batch_budget, "LOG.txt"), "wb").close()
+cli.log_append(batch_budget, [
+    ("2026-07-27", ("%03d " % index) + "x" * 250)
+    for index in range(128)
+])
+bounded_batch = run("nap", "--batch", "64", store=batch_budget)
+printed_jobs = re.findall(r"(?m)^\d+-\d+:$", bounded_batch.stdout)
+check(bounded_batch.returncode == 0 and 0 < len(printed_jobs) < 64
+      and len(bounded_batch.stdout.encode("utf-8")) <= cli.PART_CHARS
+      and len(bounded_batch.stdout.splitlines()) <= cli.PART_LINES,
+      "nap --batch exceeded transport limits instead of fitting fewer jobs")
+oversized_batch = os.path.join(batch_budget, "oversized.tsv")
+with open(oversized_batch, "wb") as f:
+    f.truncate(cli.MAX_NAP_APPLY_BYTES + 1)
+oversized_apply = run("nap", "--apply", oversized_batch, store=batch_budget)
+check(oversized_apply.returncode == 1 and "too large" in oversized_apply.stderr,
+      "nap --apply accepted an unbounded input file")
+
 errors, warnings, records_, summaries = cli._verify_store(restored)
 check(not errors and records_ == 4 and summaries == 2,
       "deep verification rejected a healthy lifecycle store: %r" % errors)
@@ -900,6 +951,15 @@ check(redacted.returncode == 0 and cli.log_get(restored, 0)[2] ==
       and cli.count(cli.tree_path(restored, 2), cli.TREE_REC) == 0,
       "redact did not erase in place and invalidate derived summaries:\n"
       + redacted.stdout + redacted.stderr)
+check(cli.tree_put(restored, 0, 2, "stale summary retaining old secret"),
+      "could not arrange interrupted-redaction regression")
+redacted_retry = run("redact", "0", "--force", store=restored)
+check(redacted_retry.returncode == 0
+      and "already redacted; rechecked its derived caches" in
+          redacted_retry.stdout
+      and cli.count(cli.tree_path(restored, 2), cli.TREE_REC) == 0,
+      "retrying redaction did not finish derived-cache cleanup:\n"
+      + redacted_retry.stdout + redacted_retry.stderr)
 errors, _, _, _ = cli._verify_store(restored)
 check(not errors, "deep verification rejected a redacted store: %r" % errors)
 
@@ -942,6 +1002,8 @@ shutil.rmtree(life)
 shutil.rmtree(restored)
 shutil.rmtree(bad_store)
 shutil.rmtree(qmd_redact)
+shutil.rmtree(batch_budget)
+shutil.rmtree(link_store)
 
 
 # QMD is an explicitly enabled, disposable semantic index. Projection files
