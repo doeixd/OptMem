@@ -15,30 +15,32 @@ See the [changelog](CHANGELOG.md) for release history.
 
 ![how OptMem works](anim/optmem.gif)
 
-## This fork vs. the original
+## Features added over the original
 
-The three headline differences are the memory lifecycle (amending), recall,
-and project awareness; the rest sharpen daily agent workflow. Everything
-below reads and extends an earlier store in place — no migration.
+Everything reads and extends an earlier store in place — no migration.
 
-| Capability | Original | This fork |
-|---|---|---|
-| Amending & lifecycle | append-only notes; no way to correct one | first-class supersession: `amend`/`retract` append corrections that reference stable `#IDs`, `show` resolves a record and its later references, blocks of already-compressed history are amendable (`amend a-b`), compression treats the latest statement as authoritative, and `--fit`/`--date` remove the friction of writing them |
-| Recall | exact regex, word for word | layered recall: case-insensitive exact regex, typo-tolerant FFF fuzzy search (automatic on zero exact hits), and optional QMD semantic recall by meaning with `--fast` mode and opt-in zero-result fallback — plus `--limit`/`--context` output controls and shell-split queries rejoined |
-| Project vs. global memory | one memory (`$MEMORY_DIR` relocates it) | automatic per-project stores keyed to the full `host/namespace/repo` remote identity (`OPTMEM_REMOTE` → origin → tracked → sole) with collision-resistant keys, move-stable markers for non-Git directories, one global store that follows you everywhere, and `memo scope` to explain the selection |
-| Session provenance | — | every written entry is stamped `@tag` (from `OPTMEM_SESSION`, or derived from the harness process — never a shared tmux/sshd ancestor — or the terminal); parallel sessions are distinguishable in `wake`, `recall`, and compression prompts, and `doctor` names the active tag and its source |
-| Over-long entries | rejected with a byte count | the error names the exact suffix to cut, and `--fit` (on `note`, `amend`, `retract`) trims at a word boundary and reports the cut |
-| Entry dates | always today | `--date` backfills a past day or timestamp (`YYYY-MM-DD[THH:MM[:SS]]`), chronology enforced by day |
-| Hooks | — | `OPTMEM_HOOK_PRE` rewrites or refuses a memory before writing; `OPTMEM_HOOK_POST` observes the written record; `OPTMEM_HOOK_SHOW` post-processes displayed lines — environment variables, never store files |
-| Entry length | 280 bytes, fixed | per-store record widths (`LOG_REC`/`TREE_REC`, set while empty) raise `ENTRY_CHARS` past 280; documented widening migration |
-| Merge granularity | fixed at 16 | `RAW_MAX` is a per-store knob (2–256) |
-| Waking up | one dump, 96-line budget | 208-line budget, paginated into parts that survive every harness's output cap (Claude Code, pi, Codex), plus a trailer naming how much was elided and the largest block to `zoom` |
-| Backup, restore & erasure | — | `export` writes a portable history, `import` restores it into an empty store with lifecycle-reference validation, and `redact --force` permanently erases one sensitive payload while preserving its ID |
-| Batch compression | one merge at a time | plus `nap --batch N` and atomic `nap --apply` for large restores |
-| Setup & diagnostics | paste the printed prompt by hand | `setup` writes managed, updatable blocks into `AGENTS.md`/`CLAUDE.md`, `doctor [--deep]` verifies the installation and every record, `completion` covers Bash/Zsh/Fish/PowerShell, and `upgrade`/`uninstall` are commands consuming tagged release assets |
-| Store integrity | fixed-width log, crash repair | plus symlink refusal throughout, scope-identity collision detection with isolated stores, atomic preflighted batch writes, and `doctor --deep` verification of every record, tree node, date, and lifecycle reference |
-| Concurrent sessions | numbered `nap` form is the documented path | bare `nap` is the documented recovery; the wrong-block error names the parallel-session cause; prompts mark other sessions' entries as testimony |
-| Windows | — | native support: PowerShell installer, `memo.cmd` launcher, msvcrt locking, PowerShell completion, and quoting rules documented in `WINDOWS.md` |
+- **Memories can be corrected.** Amend or retract anything — even history
+  that has already been compressed — without losing what was said before.
+- **Search is forgiving.** Recall survives typos and can optionally match
+  by meaning, not just exact words.
+- **Every project gets its own memory.** Wake up in a repo knowing that
+  repo; what is true everywhere follows you everywhere.
+- **Parallel sessions stay distinguishable.** Each entry names the session
+  that wrote it, so an agent knows what it saw firsthand and what it heard.
+- **Writing never becomes a fight.** Over-long entries say exactly what to
+  cut — or trim themselves — and an entry can carry the day or moment
+  something actually happened.
+- **It bends to you.** Entry length, reading budget, and merge size are
+  per-store settings, and your own commands can run before a memory is
+  written or over what is shown.
+- **It fits agent harnesses.** Waking never overflows a tool's output
+  window, and it says what was left out.
+- **History is portable and safe.** Back up, restore, permanently erase
+  something sensitive, and verify every record on demand.
+- **Setup is one command.** It teaches your agent files, diagnoses itself,
+  and upgrades in place.
+- **Windows is first-class.** Installed, locked, and completed natively in
+  PowerShell.
 
 ## Installation
 
