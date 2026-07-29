@@ -14,9 +14,10 @@ Connect and inspect:
   {memo} wake <part> [T]         continue a paginated project-memory snapshot
 
 Remember and retrieve:
-  {memo} note [--fit] "<one line>"
+  {memo} note [--fit] [--date YYYY-MM-DD] "<one line>"
                                  save one durable project memory; --fit trims
-                                 an over-long line at a word boundary
+                                 at a word boundary, --date backfills a past
+                                 day (amend and retract accept both too)
   {memo} show <id|lo-hi>         show one raw memory, or a summary block, and
                                  the later references that cover it
   {memo} amend [--fit] <id|lo-hi> "<one line>"
@@ -52,6 +53,13 @@ Scope precedence:
   that follows you everywhere. Project commands automatically select a hosted
   Git remote (origin, tracked, or sole); OPTMEM_REMOTE chooses when needed.
   Without one, first memory use creates a move-stable local project marker.
+
+Hooks (optional commands named by environment variables):
+  OPTMEM_HOOK_PRE   rewrites or refuses a memory before it is written: stdin
+                    is the candidate line, stdout replaces it, nonzero exit
+                    refuses the write.
+  OPTMEM_HOOK_POST  observes the record just written on stdin; a failure
+                    warns and never unwrites. Neither runs for import or nap.
 
 Examples:
   {memo} setup                   teach existing AGENTS.md/CLAUDE.md to use memo
@@ -115,7 +123,7 @@ ME = TOOL
 
 # The memory that follows you everywhere, as opposed to the one per project.
 GLOBAL = "~/.optmem/memory"
-VERSION = "2.0.1"
+VERSION = "2.0.2"
 INSTALL_BASE = "https://github.com/doeixd/OptMem/releases/latest/download"
 SCOPE_GLOBAL = False  # set by main() from `--global`
 
@@ -1369,7 +1377,101 @@ def _lifecycle_target(match):
     return None if hi < lo else (lo, hi)
 
 
-def _append_lifecycle(d, action, target, text, fit=False):
+# A hook is an OPTIONAL user command named by an environment variable --
+# never a file inside the store, which synchronization or import could turn
+# into an arbitrary-code-execution vector. PRE rewrites or vetoes a memory
+# before validation (stdin: the candidate line; stdout: its replacement;
+# nonzero exit: refuse the write -- a secret scanner, a normalizer, a policy
+# gate). POST observes the exact record just written; the memory is already
+# durable, so a failing POST warns and never unwrites. Neither runs for
+# `import` (bulk restore) or `nap` (summaries are not memories).
+
+def _run_hook(name, payload, timeout=60):
+    command = os.environ.get(name, "").strip()
+    if not command:
+        return None
+    try:
+        return subprocess.run(command, shell=True, input=payload,
+                              capture_output=True, text=True,
+                              encoding="utf-8", errors="replace",
+                              timeout=timeout)
+    except subprocess.TimeoutExpired:
+        die("%s timed out after %d seconds: %s" % (name, timeout, command))
+    except OSError as e:
+        die("%s could not run: %s" % (name, e.strerror or e))
+
+
+def pre_hook(text):
+    result = _run_hook("OPTMEM_HOOK_PRE", text)
+    if result is None:
+        return text
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        die("OPTMEM_HOOK_PRE refused this memory (exit %d)%s"
+            % (result.returncode,
+               ": " + detail[0] if detail else "."))
+    replacement = result.stdout.strip()
+    if not replacement:
+        die("OPTMEM_HOOK_PRE printed nothing; the memory was not written.")
+    return replacement
+
+
+def post_hook(record):
+    result = _run_hook("OPTMEM_HOOK_POST", record)
+    if result is not None and result.returncode:
+        print("Warning: OPTMEM_HOOK_POST exited %d; the memory is saved."
+              % result.returncode)
+
+
+def entry_date(d, value):
+    """A caller-supplied entry date. The log is chronologically ordered --
+    import and deep verification enforce it -- so a custom date must be a
+    real day, not in the future, and not before the newest memory."""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        die("--date takes YYYY-MM-DD, not '%s'." % value)
+    try:
+        datetime.datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        die("%s is not a real date." % value)
+    today = datetime.date.today().isoformat()
+    if value > today:
+        die("--date %s is in the future. Entries stay chronological, and "
+            "tomorrow's default date must not have to regress." % value)
+    total = log_len(d)
+    if total:
+        last = log_get(d, total - 1)[1]
+        if value < last:
+            die("--date %s precedes the newest memory (#%d, %s). Entries "
+                "stay chronological; the earlier context can still be named "
+                "in the text." % (value, total - 1, last))
+    return value
+
+
+def _entry_options(d, args, usage):
+    """(positional, fit, date) shared by note, amend, and retract."""
+    fit, date, rest, i = False, None, [], 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--fit":
+            fit = True
+        elif arg == "--date":
+            if i + 1 >= len(args):
+                die("--date needs YYYY-MM-DD.")
+            i += 1
+            date = args[i]
+        elif arg.startswith("--date="):
+            date = arg.partition("=")[2]
+        elif arg.startswith("--"):
+            die(usage)
+        else:
+            rest.append(arg)
+        i += 1
+    date = (entry_date(d, date) if date is not None
+            else datetime.date.today().isoformat())
+    return rest, fit, date
+
+
+def _append_lifecycle(d, action, target, text, fit=False, date=None):
     span = re.fullmatch(r"#?(\d+)-#?(\d+)", target)
     if span:
         lo, hi = block_id("%s-%s" % span.groups())
@@ -1381,6 +1483,7 @@ def _append_lifecycle(d, action, target, text, fit=False):
     else:
         ident = require_memory(d, target)
         ref = label = "#%d" % ident
+    text = pre_hook(text)
     dropped = ""
     if fit:
         # The reference prefix spends part of the byte budget, so the fit is
@@ -1389,12 +1492,14 @@ def _append_lifecycle(d, action, target, text, fit=False):
         text, dropped = fit_entry(text, ENTRY_CHARS - prefix)
     replacement = check(text)
     full = check("%s %s: %s" % (action, ref, replacement))
-    created = log_append(d, [(datetime.date.today().isoformat(), full)])
+    created = log_append(d, [(date or datetime.date.today().isoformat(),
+                              full)])
     print("%s %s with #%d." % (
         "Amended" if action == "Amends" else "Retracted", label, created))
     if dropped:
         print("Fitted: cut the last %d bytes at a word boundary: \"%s\""
               % (len(dropped.encode()), dropped))
+    post_hook("#%d %s %s" % log_get(d, created))
     nap = next_nap(d, created + 1)
     if nap:
         print("\n" + nap)
@@ -2571,18 +2676,21 @@ def fit_entry(text, budget=None):
 
 
 def cmd_note(d, args):
-    fit = "--fit" in args
-    rest = [arg for arg in args if arg != "--fit"]
-    if len(rest) != 1 or len(args) != len(rest) + (1 if fit else 0):
-        die("usage: %s note [--fit] \"<one line, at most %d UTF-8 bytes>\""
-            % (ME, ENTRY_CHARS))
-    text, dropped = (fit_entry(rest[0]) if fit else (rest[0], ""))
+    rest, fit, date = _entry_options(
+        d, args, "usage: %s note [--fit] [--date YYYY-MM-DD] \"<one line, "
+        "at most %d UTF-8 bytes>\"" % (ME, ENTRY_CHARS))
+    if len(rest) != 1:
+        die("usage: %s note [--fit] [--date YYYY-MM-DD] \"<one line, at most "
+            "%d UTF-8 bytes>\"" % (ME, ENTRY_CHARS))
+    text = pre_hook(rest[0])
+    text, dropped = (fit_entry(text) if fit else (text, ""))
     text = check(text)
-    i = log_append(d, [(datetime.date.today().isoformat(), text)])
+    i = log_append(d, [(date, text)])
     print("Saved as #%d." % i)
     if dropped:
         print("Fitted: cut the last %d bytes at a word boundary: \"%s\""
               % (len(dropped.encode()), dropped))
+    post_hook("#%d %s %s" % log_get(d, i))
     nap = next_nap(d, i + 1)
     if nap:
         print("\n" + nap)
@@ -2634,20 +2742,21 @@ def cmd_show(d, args):
 
 
 def cmd_amend(d, args):
-    fit = "--fit" in args
-    rest = [arg for arg in args if arg != "--fit"]
-    if len(rest) != 2 or len(args) != len(rest) + (1 if fit else 0):
-        die("usage: %s amend [--fit] <id|lo-hi> \"<corrected replacement>\""
-            % ME)
-    _append_lifecycle(d, "Amends", rest[0], rest[1], fit=fit)
+    usage = ("usage: %s amend [--fit] [--date YYYY-MM-DD] <id|lo-hi> "
+             "\"<corrected replacement>\"" % ME)
+    rest, fit, date = _entry_options(d, args, usage)
+    if len(rest) != 2:
+        die(usage)
+    _append_lifecycle(d, "Amends", rest[0], rest[1], fit=fit, date=date)
 
 
 def cmd_retract(d, args):
-    fit = "--fit" in args
-    rest = [arg for arg in args if arg != "--fit"]
-    if len(rest) != 2 or len(args) != len(rest) + (1 if fit else 0):
-        die("usage: %s retract [--fit] <id|lo-hi> \"<reason>\"" % ME)
-    _append_lifecycle(d, "Retracts", rest[0], rest[1], fit=fit)
+    usage = ("usage: %s retract [--fit] [--date YYYY-MM-DD] <id|lo-hi> "
+             "\"<reason>\"" % ME)
+    rest, fit, date = _entry_options(d, args, usage)
+    if len(rest) != 2:
+        die(usage)
+    _append_lifecycle(d, "Retracts", rest[0], rest[1], fit=fit, date=date)
 
 
 def _nap_apply(d, path):
@@ -4133,6 +4242,11 @@ def cmd_doctor(d, args):
     print("  Session tag:   %s" %
           ("@%s (%s)" % (tag, tag_source) if tag
            else "none (%s); entries are written untagged" % tag_source))
+    for hook in ("OPTMEM_HOOK_PRE", "OPTMEM_HOOK_POST"):
+        command = os.environ.get(hook, "").strip()
+        if command:
+            print("  %-14s %s" % (hook.split("_")[-1].capitalize() + " hook:",
+                                  command))
     qmd = _qmd_status(d)
     print("  QMD executable:   %s" % qmd["executable"])
     print("  QMD integration: %s" %

@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.0.2 — 2026-07-29
+
+- `note`, `amend`, and `retract` accept `--date YYYY-MM-DD` to backfill an
+  entry's day — a real date, not in the future, and not before the newest
+  memory, so the log stays chronologically ordered and import/verification
+  invariants hold.
+- Optional hooks, named by environment variables so a synced store can never
+  execute code: `OPTMEM_HOOK_PRE` rewrites or refuses a memory before it is
+  written (stdin: candidate line; stdout: replacement; nonzero exit:
+  refusal), `OPTMEM_HOOK_POST` observes the record just written and warns —
+  never unwrites — on failure. Neither runs for `import` or `nap`.
+  `memo doctor` lists active hooks.
+- Documented the store-widening recipe end to end in the README: export,
+  move the old store directory aside (the one sanctioned manual touch, as a
+  migration backup), recreate empty, set widths, import, recompress.
+
 ## 2.0.1 — 2026-07-29
 
 ### Configurable sizes

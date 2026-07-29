@@ -206,7 +206,7 @@ commands such as `scope` and `doctor` never create the marker or a store.
 | `memo qmd config [FALLBACK=on\|off]` | inspect or opt into semantic fallback after exact and FFF misses |
 | `memo qmd disable [--purge]` | disable QMD; optionally remove its projection |
 | `memo wake` | read both memories — global, then project; first command of every session |
-| `memo note [--fit] "..."` | record one memory: one line, up to 280 UTF-8 bytes (project by default); `--fit` trims at a word boundary and reports the cut |
+| `memo note [--fit] [--date YYYY-MM-DD] "..."` | record one memory: one line, up to 280 UTF-8 bytes (project by default); `--fit` trims at a word boundary, `--date` backfills a past day (also on `amend`/`retract`) |
 | `memo show <id\|lo-hi>` | show one canonical raw memory — or a summary block — and later records that reference it |
 | `memo amend [--fit] <id\|lo-hi> "..."` | append a corrected replacement; a `lo-hi` block supersedes an already-compressed range |
 | `memo retract [--fit] <id\|lo-hi> "<reason>"` | append that an earlier memory or summarized range is no longer authoritative |
@@ -257,6 +257,25 @@ it lists that supersession as a later reference. (`amend`/`retract` write
 only aligned blocks; `import` also tolerates plain `#a-#b` ranges from
 foreign histories.)
 
+### Hooks
+
+Two optional environment variables name commands that pre- or post-process
+every memory written by `note`, `amend`, and `retract` (never `import` or
+`nap`):
+
+- `OPTMEM_HOOK_PRE` — receives the candidate line on stdin *before*
+  validation; its stdout replaces the line, and a nonzero exit refuses the
+  write entirely. A secret scanner, a normalizer, or a policy gate lives
+  here. The refusal message is the hook's own stderr.
+- `OPTMEM_HOOK_POST` — receives the exact record just written
+  (`#id date @tag text`) on stdin. The memory is already durable, so a
+  failing post hook prints a warning and never unwrites — use it for sync,
+  notification, or external indexing.
+
+Hooks are deliberately environment variables, not files inside the store: a
+synced or imported store directory must never be able to execute code.
+`memo doctor` lists any active hooks.
+
 ### Provenance
 
 Every entry written by `note`, `amend`, and `retract` is stamped with an
@@ -274,6 +293,12 @@ and where it came from. Three honest limits: tags are cooperative claims,
 not authenticated identities — any process may set `OPTMEM_SESSION` to any
 value; when no stable identity exists, entries are simply written untagged;
 and a pre-2.0 entry whose text happened to begin `@word ` reads as if tagged.
+
+An entry's date defaults to today. `--date YYYY-MM-DD` backfills a real past
+day — useful when recording something learned earlier — but the log stays
+chronologically ordered: the date may not be in the future and may not
+precede the newest memory. To reference an out-of-order past event, name it
+in the text instead.
 
 `redact` is intentionally different and requires `--force`: it replaces the
 payload with `[REDACTED BY USER]`, preserves the ID and date, invalidates
@@ -465,9 +490,27 @@ set while the store is empty:
 memo config LOG_REC=640 TREE_REC=576 ENTRY_CHARS=560   # on a fresh store
 ```
 
-To widen an existing memory, `memo export` it, create a fresh store with the
-new widths, and `memo import` there. `ENTRY_CHARS` is always capped at
-`min(TREE_REC - 8, LOG_REC - 40)` so every entry and summary fits its record.
+`ENTRY_CHARS` is always capped at `min(TREE_REC - 8, LOG_REC - 40)` so every
+entry and summary fits its record.
+
+To widen an **existing** memory, migrate it — the one workflow where moving a
+store directory by hand is sanctioned, because the moved directory doubles as
+the migration backup:
+
+```sh
+memo export wider-backup.txt   # portable history; IDs are implied by order
+memo scope                     # note the Store path (memo doctor for global)
+mv <store> <store>.pre-widen   # set the old store aside, keep it as backup
+memo config LOG_REC=640 TREE_REC=576 ENTRY_CHARS=560
+memo import wider-backup.txt
+memo nap --batch 8             # rebuild the summaries, a few jobs at a time
+```
+
+A project store reappears empty on first use, so `config` can size it
+directly; for the global store (or a `MEMORY_DIR` store) run `memo init`
+once before `config`. Amendment and retraction references survive because
+import recreates the same IDs in order. Delete `<store>.pre-widen` only
+after `memo doctor --deep` reports the new store healthy.
 
 Set `$MEMORY_DIR` to pin a single store and skip scoping — a synced folder, a
 git repo. See [WINDOWS.md](WINDOWS.md) for native PowerShell usage and locking
