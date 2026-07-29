@@ -17,43 +17,30 @@ See the [changelog](CHANGELOG.md) for release history.
 
 ## Features added over the original
 
-The headliners are the memory lifecycle, recall, and project awareness; the
-rest sharpen daily agent workflow. Everything reads and extends an earlier
-store in place — no migration.
+Everything reads and extends an earlier store in place — no migration.
 
-- **Amending** — `amend`/`retract` supersede memories by stable `#ID` or by
-  already-compressed block (`amend a-b`); `show` resolves a record and every
-  later reference to it. The original was append-only, with no way to
-  correct anything.
-- **Layered recall** — case-insensitive regex, typo-tolerant FFF fuzzy
-  search, and optional QMD semantic recall by meaning, with
-  `--limit`/`--context` controls. The original had word-for-word regex only.
-- **Project vs. global memory** — automatic per-project stores keyed to the
-  Git remote identity, plus one global store; `memo scope` explains the
-  selection. The original had a single memory.
-- **Session provenance** — every entry is stamped `@tag`
-  (`OPTMEM_SESSION`, or derived), so parallel sessions can tell their own
-  observations from another session's testimony.
-- **Hooks** — `OPTMEM_HOOK_PRE` (rewrite/refuse before writing),
-  `OPTMEM_HOOK_POST` (observe the written record), `OPTMEM_HOOK_SHOW`
-  (post-process displayed lines) — environment variables, never store files.
-- **Frictionless writing** — over-long entries name the exact suffix to
-  cut, `--fit` trims at a word boundary, `--date` backfills a past day or
-  timestamp.
-- **Tunable sizes** — merge granularity (`RAW_MAX`) and per-store record
-  widths that raise entry length past 280 bytes, with a documented widening
-  migration.
-- **Harness-safe wake** — a bigger budget paginated to survive every
-  harness's output cap, plus a trailer naming what was elided.
-- **Backup, restore & erasure** — portable `export`/`import` and forced
-  `redact` for sensitive payloads.
-- **Batch compression** — `nap --batch N` and atomic `nap --apply` for
-  large restores.
-- **Setup & diagnostics** — managed `AGENTS.md`/`CLAUDE.md` blocks,
-  `doctor [--deep]` verification of every record, four-shell completion,
-  `upgrade`/`uninstall` commands.
-- **Native Windows** — PowerShell installer, `memo.cmd` launcher, msvcrt
-  locking, and documented quoting rules.
+- **Memories can be corrected.** Amend or retract anything — even history
+  that has already been compressed — without losing what was said before.
+- **Search is forgiving.** Recall survives typos and can optionally match
+  by meaning, not just exact words.
+- **Every project gets its own memory.** Wake up in a repo knowing that
+  repo; what is true everywhere follows you everywhere.
+- **Parallel sessions stay distinguishable.** Each entry names the session
+  that wrote it, so an agent knows what it saw firsthand and what it heard.
+- **Writing never becomes a fight.** Over-long entries say exactly what to
+  cut — or trim themselves — and an entry can carry the day or moment
+  something actually happened.
+- **It bends to you.** Entry length, reading budget, and merge size are
+  per-store settings, and your own commands can run before a memory is
+  written or over what is shown.
+- **It fits agent harnesses.** Waking never overflows a tool's output
+  window, and it says what was left out.
+- **History is portable and safe.** Back up, restore, permanently erase
+  something sensitive, and verify every record on demand.
+- **Setup is one command.** It teaches your agent files, diagnoses itself,
+  and upgrades in place.
+- **Windows is first-class.** Installed, locked, and completed natively in
+  PowerShell.
 
 ## Installation
 
