@@ -14,18 +14,23 @@ Connect and inspect:
   {memo} wake <part> [T]         continue a paginated project-memory snapshot
 
 Remember and retrieve:
-  {memo} note "<one line>"       save one durable project memory
+  {memo} note [--fit] "<one line>"
+                                 save one durable project memory; --fit trims
+                                 an over-long line at a word boundary
   {memo} show <id>               show one raw memory and later references
-  {memo} amend <id> "<one line>" append a corrected replacement
-  {memo} retract <id> "<reason>" mark a memory no longer authoritative
+  {memo} amend <id|lo-hi> "<one line>"
+                                 append a corrected replacement; a lo-hi block
+                                 supersedes an already-compressed range
+  {memo} retract <id|lo-hi> "<reason>"
+                                 mark a memory or block no longer authoritative
   {memo} recall [options] <query>
                                  exact, fuzzy, or optional semantic recall
   {memo} zoom [--depth N] <range>
                                  open one or more summary-tree levels
 
 Maintain:
-  {memo} nap [id "..."|--batch N|--apply FILE]
-                                 complete one or more compressions
+  {memo} nap                     print or recover the next compression job
+  {memo} nap <lo>-<hi> "<line>"  complete it; also --batch N, --apply FILE
   {memo} resummarize <lo>-<hi>   discard a bad summary; nap rebuilds it
   {memo} redact <id> --force     permanently remove one sensitive payload
   {memo} config [NAME=N]         inspect or change this store's sizes
@@ -109,7 +114,7 @@ ME = TOOL
 
 # The memory that follows you everywhere, as opposed to the one per project.
 GLOBAL = "~/.optmem/memory"
-VERSION = "1.1.1"
+VERSION = "2.0.0"
 INSTALL_BASE = "https://github.com/doeixd/OptMem/releases/latest/download"
 SCOPE_GLOBAL = False  # set by main() from `--global`
 
@@ -901,17 +906,163 @@ def locked(d):
     return lock
 
 
+# ---------------------------------------------------------------- sessions
+
+# Which session wrote a memory matters once parallel sessions share a store:
+# a compressor is handed entries it never witnessed, and a reader cannot
+# weight "kept per user" without knowing who heard the user say it. Every
+# entry this process writes is therefore stamped `@tag` inside its payload.
+# The payload placement is the design: readers, wake, recall, and the nap
+# prompts all show authorship with no record-format change, an untagged v1
+# store reads back unchanged, and the tag can be dropped when space demands.
+# OPTMEM_SESSION names the tag explicitly. Without it, the process ancestry
+# is walked past shells and interpreters to the harness that owns the whole
+# session -- the one ancestor stable across every command it spawns -- and
+# its identity is hashed. Provenance is best effort: on any failure the
+# entry is simply written untagged, never refused.
+
+_SESSION_TAG = None
+_TRANSIENT_ANCESTORS = {
+    "bash", "cmd", "conhost", "dash", "fish", "ksh", "login", "memo",
+    "powershell", "powershell_ise", "pwsh", "py", "python", "python3",
+    "pythonw", "sh", "tcsh", "winpty-agent", "zsh",
+}
+
+
+def _windows_ancestry():
+    """pid -> (parent pid, executable name), from one Toolhelp snapshot."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Entry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    k32 = ctypes.windll.kernel32
+    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    snapshot = k32.CreateToolhelp32Snapshot(2, 0)  # TH32CS_SNAPPROCESS
+    if not snapshot or snapshot == wintypes.HANDLE(-1).value:
+        return {}
+    table, entry = {}, Entry()
+    entry.dwSize = ctypes.sizeof(Entry)
+    try:
+        more = k32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while more:
+            table[int(entry.th32ProcessID)] = (
+                int(entry.th32ParentProcessID), entry.szExeFile)
+            more = k32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        k32.CloseHandle(snapshot)
+    return table
+
+
+def _windows_start_time(pid):
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.windll.kernel32
+    k32.OpenProcess.restype = wintypes.HANDLE
+    handle = k32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ""
+    try:
+        times = (wintypes.FILETIME * 4)()
+        if not k32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+            return ""
+        return str((times[0].dwHighDateTime << 32) | times[0].dwLowDateTime)
+    finally:
+        k32.CloseHandle(handle)
+
+
+def _proc_entry(pid):
+    """(parent pid, name, start time) from /proc, or via ps elsewhere."""
+    stat = "/proc/%d/stat" % pid
+    if os.path.exists(stat):
+        with open(stat, "rb") as source:
+            data = source.read().decode("utf-8", "replace")
+        name = data[data.index("(") + 1:data.rindex(")")]
+        fields = data[data.rindex(")") + 2:].split()
+        return int(fields[1]), name, fields[19]
+    values = []
+    for field in ("ppid", "comm", "lstart"):
+        result = subprocess.run(["ps", "-p", str(pid), "-o", field + "="],
+                                capture_output=True, text=True)
+        if result.returncode != 0 or not result.stdout.strip():
+            raise OSError("ps found no process %d" % pid)
+        values.append(result.stdout.strip())
+    return int(values[0]), values[1], values[2]
+
+
+def _harness_identity():
+    """(pid, start time) of the nearest non-shell, non-interpreter ancestor."""
+    if os.name == "nt":
+        table = _windows_ancestry()
+        pid = table.get(os.getpid(), (0, ""))[0]
+        for _ in range(12):
+            if pid not in table:
+                break
+            parent, exe = table[pid]
+            name = os.path.basename(exe).lower()
+            if name.endswith(".exe"):
+                name = name[:-4]
+            if name not in _TRANSIENT_ANCESTORS:
+                return pid, _windows_start_time(pid)
+            pid = parent
+        return None
+    pid = os.getppid()
+    for _ in range(12):
+        if pid <= 1:
+            break
+        parent, name, start = _proc_entry(pid)
+        base = os.path.basename(name.strip()).lower()
+        if base not in _TRANSIENT_ANCESTORS:
+            return pid, start
+        pid = parent
+    return None
+
+
+def session_tag():
+    """This session's opaque author tag, computed once, '' when unknowable."""
+    global _SESSION_TAG
+    if _SESSION_TAG is not None:
+        return _SESSION_TAG
+    explicit = re.sub(r"[^A-Za-z0-9_-]", "",
+                      os.environ.get("OPTMEM_SESSION", ""))[:8]
+    if explicit:
+        _SESSION_TAG = explicit
+        return _SESSION_TAG
+    try:
+        identity = _harness_identity()
+    except Exception:
+        identity = None
+    _SESSION_TAG = "" if identity is None else hashlib.sha256(
+        ("%d %s" % identity).encode("utf-8")).hexdigest()[:4]
+    return _SESSION_TAG
+
+
 def log_append(d, items):
     """Append memories, items = [(date, text)]. The only way LOG.txt ever
     changes. Ids are assigned INSIDE the lock: two sessions noting at the same
     moment must not be handed the same id. Returns the first id used."""
+    tag = session_tag()
     lock = locked(d)
     try:
         repair(log_path(d), LOG_REC)
         base = log_len(d)
         with open(log_path(d), "ab") as f:
             for k, (date, text) in enumerate(items):
-                f.write(pad("#%d %s %s" % (base + k, date, text), LOG_REC))
+                body = "@%s %s" % (tag, text) if tag else text
+                record = "#%d %s %s" % (base + k, date, body)
+                if len(record.encode()) > LOG_REC - 1:
+                    # provenance is best-effort metadata; the memory is not
+                    record = "#%d %s %s" % (base + k, date, text)
+                f.write(pad(record, LOG_REC))
             f.flush()
             os.fsync(f.fileno())
         return base
@@ -1089,8 +1240,18 @@ def check(text):
             "separately." % (text.count("\n") + 1))
     n = len(text.encode())
     if n > ENTRY_CHARS:
-        die("Too long: %d bytes, limit %d. Accented characters cost 2 bytes. "
-            "Compress it further." % (n, ENTRY_CHARS))
+        over = n - ENTRY_CHARS
+        # Show the writer exactly what must go: the shortest suffix whose
+        # removal fits the limit. Guessing costs a rejection loop per guess.
+        cut, tail_bytes = 0, 0
+        for ch in reversed(text):
+            tail_bytes += len(ch.encode())
+            cut += 1
+            if tail_bytes >= over:
+                break
+        die("Too long: %d bytes, limit %d -- over by %d. Accented characters "
+            "cost 2 bytes.\nCut at least the last %d bytes: \"%s\""
+            % (n, ENTRY_CHARS, over, tail_bytes, text[len(text) - cut:]))
     return text
 
 
@@ -1098,6 +1259,12 @@ def memory_id(value):
     """Parse a user-facing stable memory ID, accepting either 42 or #42."""
     match = re.fullmatch(r"#?(\d+)", value)
     if not match:
+        span = re.fullmatch(r"#?(\d+-\d+)", value)
+        if span:
+            die("'%s' is a summary block, not one memory. Raw memories keep "
+                "their #IDs after compression: run `%s zoom %s` to find the "
+                "raw #ID inside it, then target that."
+                % (value, ME, span.group(1)))
         die("'%s' is not a memory ID. Use a number such as 42 or #42." % value)
     return int(match.group(1))
 
@@ -1113,16 +1280,39 @@ def require_memory(d, value):
     return ident
 
 
-_LIFECYCLE_REF = re.compile(r"^(Amends|Retracts) #(\d+):\s+")
+# A lifecycle record may target one raw memory (`Amends #4:`) or a whole
+# aligned block (`Amends #4-#5:`). The block form exists because supersession
+# outlives compression: once the authoritative statement lives in a summary
+# line, the correction targets the summarized range itself, and `show` on any
+# raw #ID inside it still lists the correction as a later reference.
+_LIFECYCLE_REF = re.compile(
+    r"^(?:@[\w-]{1,8} )?(Amends|Retracts) #(\d+)(?:-#(\d+))?:\s+")
+
+
+def _lifecycle_target(match):
+    """(lo, hi] ids referenced, or None when the range is malformed."""
+    lo = int(match.group(2))
+    hi = int(match.group(3)) if match.group(3) is not None else lo
+    return None if hi < lo else (lo, hi)
 
 
 def _append_lifecycle(d, action, target, text):
-    ident = require_memory(d, target)
+    span = re.fullmatch(r"#?(\d+)-#?(\d+)", target)
+    if span:
+        lo, hi = block_id("%s-%s" % span.groups())
+        total = log_len(d)
+        if hi > total:
+            die("No block %d-%d: this store holds %s."
+                % (lo, hi - 1, plural(total, "memory")))
+        ref = label = "#%d-#%d" % (lo, hi - 1)
+    else:
+        ident = require_memory(d, target)
+        ref = label = "#%d" % ident
     replacement = check(text)
-    full = check("%s #%d: %s" % (action, ident, replacement))
+    full = check("%s %s: %s" % (action, ref, replacement))
     created = log_append(d, [(datetime.date.today().isoformat(), full)])
-    print("%s #%d with #%d." % (
-        "Amended" if action == "Amends" else "Retracted", ident, created))
+    print("%s %s with #%d." % (
+        "Amended" if action == "Amends" else "Retracted", label, created))
     nap = next_nap(d, created + 1)
     if nap:
         print("\n" + nap)
@@ -1182,7 +1372,9 @@ def nap_prompt(d, lo, hi, left):
             "a link between unrelated facts. Later amendments, corrections, "
             "and retractions override the records they reference: preserve the "
             "final outcome, and keep earlier information only when its history "
-            "or failure reason remains useful.\n\n"
+            "or failure reason remains useful. A leading @tag names the "
+            "session that wrote an entry; entries from other sessions are "
+            "their testimony, not yours.\n\n"
             "%s\n%s\n"
             "Run: %s nap %d-%d \"<your line>\""
             % (lo, hi - 1, ENTRY_CHARS, body, tail, ME, lo, hi - 1))
@@ -1218,7 +1410,8 @@ def batch_nap_prompt(d, jobs, left):
         "bytes." % ENTRY_CHARS,
         "Preserve durable decisions, outcomes, constraints, causal links, and "
         "useful failure reasons. Later amendments, corrections, and "
-        "retractions override what they reference. Drop transient status and "
+        "retractions override what they reference. A leading @tag names the "
+        "session that wrote an entry. Drop transient status and "
         "repetition; invent nothing.",
         "",
     ]
@@ -1310,19 +1503,35 @@ want to be worked with, this machine, your own tooling. How one project does
 something is not global, however much it feels like a lesson -- write it to
 that project. A `MEMORY_DIR` override intentionally pins commands to one store.
 
+If a line is over the byte limit, `{memo} note --fit` trims it at a word
+boundary and reports exactly what was cut; rewrite only if the cut loses
+something essential.
+
 Do not register redundant memories. Never record secrets, credentials,
 authentication material, or raw sensitive data.
 
+Every memory you write is stamped with this session's opaque `@tag`.
+Entries bearing another tag are a parallel session's testimony: weigh them
+as reports, not as your own observations, and never restate them as yours.
+Set OPTMEM_SESSION to name the tag; otherwise one is derived automatically.
+
 If a durable memory changes, do not contradict it with an unexplained note.
 Use `{memo} amend <id> "<replacement>"`; use
-`{memo} retract <id> "<reason>"` when it has no replacement. Ordinary memories
-may reference earlier `#IDs` to anchor stable facts and reasoning. Use
-`{memo} show <id>` when you need the exact record and its later references.
+`{memo} retract <id> "<reason>"` when it has no replacement. When the
+authoritative statement already lives in a compressed summary line `#a-b`,
+amend the whole block: `{memo} amend <a>-<b> "<replacement>"` supersedes the
+summarized range and stays linked to every raw memory inside it. Ordinary
+memories may reference earlier `#IDs` to anchor stable facts and reasoning.
+Use `{memo} show <id>` when you need the exact record and its later
+references, including block supersessions that cover it.
 Redaction is not correction: only the user may request it, and it exists for
 content that must actually be erased.
 
 If `{memo} note` asks a compression, follow its prompt and run the exact
-`nap` command before your next action.
+`nap` command before your next action. If `nap <range>` reports the wrong
+block, a parallel session settled it first: run bare `{memo} nap` to get
+the current job, and treat entries you did not write as another session's
+testimony.
 A compression is a lossy retrieval cue for the supplied range, not a
 deletion: the raw memories remain searchable. Write one self-contained line.
 Preserve durable decisions, outcomes, constraints, causal links, preferences,
@@ -2164,11 +2373,12 @@ def cmd_wake(d, args, tail=True, continuation=None):
         if tail:
             print("You are awake.")
         return True
-    lines = []
+    lines, summarized = [], []
     for lo, hi in cover(T, WAKE_LINES):
         if hi - lo == 1:
             lines.append("#%d %s %s" % log_get(d, lo))
         else:
+            summarized.append((lo, hi))
             s = tree_get(d, lo, hi)
             if s is None:
                 nap = next_nap(d, T)
@@ -2211,6 +2421,14 @@ def cmd_wake(d, args, tail=True, continuation=None):
     else:
         # always, even for a one-part memory: the contract an agent is given
         # is "run parts until one says awake", so it must always arrive
+        if summarized:
+            hidden = sum(hi - lo for lo, hi in summarized)
+            big_lo, big_hi = max(summarized, key=lambda b: b[1] - b[0])
+            print("Frontier: %d of %s shown raw; %s cover the other %d "
+                  "(largest #%d-%d; expand with: %s zoom %d-%d)."
+                  % (T - hidden, plural(T, "memory"),
+                     plural(len(summarized), "summary"), hidden,
+                     big_lo, big_hi - 1, ME, big_lo, big_hi - 1))
         if qmd_enabled(d):
             print('Semantic recall is available: %s recall --semantic "<meaning>"'
                   % ME)
@@ -2254,13 +2472,33 @@ def wake_both():
     wake_project([])
 
 
+def fit_entry(text):
+    """The longest word-boundary prefix that fits, and what was cut."""
+    text = text.strip()
+    if len(text.encode()) <= ENTRY_CHARS:
+        return text, ""
+    keep = text
+    while " " in keep and len(keep.encode()) > ENTRY_CHARS:
+        keep = keep.rsplit(" ", 1)[0].rstrip()
+    while len(keep.encode()) > ENTRY_CHARS:  # one word longer than the limit
+        keep = keep[:-1]
+    keep = keep.rstrip()
+    return keep, text[len(keep):].strip()
+
+
 def cmd_note(d, args):
-    if len(args) != 1:
-        die("usage: %s note \"<one line, at most %d UTF-8 bytes>\""
+    fit = "--fit" in args
+    rest = [arg for arg in args if arg != "--fit"]
+    if len(rest) != 1 or len(args) != len(rest) + (1 if fit else 0):
+        die("usage: %s note [--fit] \"<one line, at most %d UTF-8 bytes>\""
             % (ME, ENTRY_CHARS))
-    text = check(args[0])
+    text, dropped = (fit_entry(rest[0]) if fit else (rest[0], ""))
+    text = check(text)
     i = log_append(d, [(datetime.date.today().isoformat(), text)])
     print("Saved as #%d." % i)
+    if dropped:
+        print("Fitted: cut the last %d bytes at a word boundary: \"%s\""
+              % (len(dropped.encode()), dropped))
     nap = next_nap(d, i + 1)
     if nap:
         print("\n" + nap)
@@ -2272,9 +2510,17 @@ def cmd_show(d, args):
     ident = require_memory(d, args[0])
     print("#%d %s %s" % log_get(d, ident))
     pattern = re.compile(r"(?<!\d)#%d(?!\d)" % ident)
+    spans = re.compile(r"#(\d+)-#(\d+)")
+
+    def references(text):
+        if pattern.search(text):
+            return True
+        return any(int(m.group(1)) <= ident <= int(m.group(2))
+                   for m in spans.finditer(text))
+
     later, found = deque(maxlen=MAX_SHOW_REFERENCES), 0
     for entry in log_scan(d):
-        if entry[0] > ident and pattern.search(entry[2]):
+        if entry[0] > ident and references(entry[2]):
             later.append(entry)
             found += 1
     if later:
@@ -2372,8 +2618,9 @@ def cmd_nap(d, args):
             if tree_get(d, lo, hi) is not None:
                 print("%d-%d is already settled." % (lo, hi - 1))
             else:
-                die("Wrong block: %s. Blocks are built in order; the next is "
-                    "%d-%d. Run: %s nap"
+                die("Wrong block: %s. Blocks are built in order; a parallel "
+                    "session may have settled yours meanwhile. The next is "
+                    "%d-%d. Run bare `%s nap` to get the current job."
                     % (args[0], todo[0][0], todo[0][1] - 1, ME))
         elif not tree_put(d, lo, hi, check(args[1])):
             print("%d-%d was settled or forgotten meanwhile." % (lo, hi - 1))
@@ -3044,9 +3291,15 @@ def _recall_args(args):
         else:
             query.append(arg)
         i += 1
-    if len(query) != 1:
+    if not query:
         die("usage: %s recall [--fuzzy|--semantic [--fast]] [--limit N] "
-            "[--context N] <query>" % ME)
+            "[--context N] <query>\n"
+            "Quote the query: unquoted regex characters like | are taken by "
+            "the shell before this tool runs." % ME)
+    # An unquoted multi-word query reaches argv as several words. Rejecting
+    # it costs a round trip on every shell-quoting slip; the words are
+    # rejoined instead, exactly as they were typed.
+    query = [" ".join(query)]
     if fuzzy and semantic:
         die("Use either --fuzzy or --semantic, not both.")
     if fast and not semantic:
@@ -3404,17 +3657,21 @@ def _parse_import(path):
             die("line %d: date %s precedes the previous memory (%s)."
                 % (i, date, last))
         text = text.strip()
-        if not text or len(text.encode()) > ENTRY_CHARS:
+        # A leading @session tag is provenance, not payload: an exported
+        # maximum-length entry must round-trip with its author intact.
+        tagged = re.match(r"^@[\w-]{1,8} ", text)
+        budget = ENTRY_CHARS + (tagged.end() if tagged else 0)
+        if not text or len(text.encode()) > budget:
             die("line %d: %d bytes, limit %d."
-                % (i, len(text.encode()), ENTRY_CHARS))
+                % (i, len(text.encode()), budget))
         lifecycle = _LIFECYCLE_REF.match(text)
         if lifecycle:
-            target = int(lifecycle.group(2))
             if lifecycle.group(1) == "Amends":
                 amendments += 1
             else:
                 retractions += 1
-            if target >= len(out):
+            span = _lifecycle_target(lifecycle)
+            if span is None or span[1] >= len(out):
                 invalid_refs += 1
         out.append((date, text))
         longest = max(longest, len(text.encode()))
@@ -3593,9 +3850,14 @@ def _verify_store(d):
             if not text:
                 errors.append("memory #%d has an empty payload" % expected)
             lifecycle = _LIFECYCLE_REF.match(text)
-            if lifecycle and int(lifecycle.group(2)) >= expected:
-                errors.append("%s #%d points forward or to itself"
-                              % (lifecycle.group(1), expected))
+            if lifecycle:
+                span = _lifecycle_target(lifecycle)
+                if span is None:
+                    errors.append("%s #%d has a backwards range"
+                                  % (lifecycle.group(1), expected))
+                elif span[1] >= expected:
+                    errors.append("%s #%d points forward or to itself"
+                                  % (lifecycle.group(1), expected))
 
     tree = os.path.join(d, "TREE")
     summaries = 0

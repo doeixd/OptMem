@@ -1,5 +1,37 @@
 # Changelog
 
+## 2.0.0 — 2026-07-29
+
+### Provenance
+
+- Every entry written by `note`, `amend`, and `retract` now carries an opaque
+  session tag inside its payload (`#id date @tag text`). `OPTMEM_SESSION`
+  names the tag explicitly; otherwise it is derived from the harness process
+  that owns the session. Tags are visible in `wake`, `recall`, `zoom`, `show`,
+  and nap prompts, so compressors and readers can weight another session's
+  testimony correctly. Tagging is best effort: untagged v1 stores read back
+  unchanged, `import` never invents tags, and a tag is dropped rather than
+  refused when a record would overflow.
+
+### Supersession of compressed history
+
+- `amend` and `retract` accept a summary-block target: `amend <lo>-<hi>`
+  appends `Amends #lo-#hi: …`, superseding a range whose authoritative
+  statement already lives in a compressed summary line. `show <id>` lists
+  block supersessions covering that raw memory as later references. Import
+  and deep verification validate range references.
+
+### Workflow
+
+- Over-long entries now report the overage and the exact suffix to cut;
+  `note --fit` trims at a word boundary and prints what was dropped.
+- Bare `nap` is the documented primary form; the wrong-block error names it
+  as the recovery when a parallel session settles a block first.
+- `recall` rejoins a shell-split multi-word query instead of rejecting it,
+  and documents the PowerShell quoting rule in its usage error.
+- The final `wake` part prints a frontier trailer naming how many raw
+  memories the bounded view elided and the largest summarized block to zoom.
+
 ## 1.1.1 — 2026-07-27
 
 ### Agent guidance

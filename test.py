@@ -18,6 +18,9 @@ from importlib.machinery import SourceFileLoader
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 MEMO = os.path.join(HERE, "memo")
+# Pin the provenance tag before the CLI module loads: every in-process and
+# spawned command in this run writes as the same deterministic session.
+os.environ["OPTMEM_SESSION"] = "t1"
 cli = SourceFileLoader("memo_cli", MEMO).load_module()
 cover = cli.cover
 
@@ -188,7 +191,9 @@ check(helped.returncode == 0 and "Usage:" in helped.stdout
       and "upgrade" in helped.stdout and "uninstall" in helped.stdout
       and "scope" in helped.stdout and "doctor" in helped.stdout
       and "qmd [help]" in helped.stdout
-      and "recall [options]" in helped.stdout and "amend <id>" in helped.stdout
+      and "recall [options]" in helped.stdout
+      and "amend <id|lo-hi>" in helped.stdout
+      and "note [--fit]" in helped.stdout
       and "resummarize" in helped.stdout and "export [--with-ids]" in
           helped.stdout,
       "--help is not a useful command overview:\n" + helped.stdout + helped.stderr)
@@ -686,6 +691,11 @@ check(r_.returncode == 1 and "Traceback" not in r_.stderr
 
 r = run("note", "x" * 281)
 check(r.returncode == 1 and "Too long" in r.stderr, "over-long note accepted")
+check("over by 1" in r.stderr and 'last 1 bytes: "x"' in r.stderr,
+      "an over-long note does not show what to cut: " + r.stderr)
+r = run("note", "x" * 280 + "é")   # 282 bytes: the 2-byte char must be shown
+check(r.returncode == 1 and 'last 2 bytes: "é"' in r.stderr,
+      "the overage suffix split a multi-byte character: " + r.stderr)
 r = run("note", "two\nlines")
 check(r.returncode == 1 and "one line" in r.stderr, "multi-line note accepted")
 r = run("note", "   ")
@@ -760,8 +770,12 @@ check(lines[-1].startswith("#%d " % (N - 1)), "newest memory not last / not raw"
 check(lines[0].startswith("#0-"), "oldest line should be a summary block")
 check(re.search(r"Run: .* wake 2", run("wake").stdout),
       "part 1 must ORDER the next command, not label it")
-check("You are awake." in run("wake", str(len(parts))).stdout,
-      "last part must say it is last")
+last_part = run("wake", str(len(parts))).stdout
+check("You are awake." in last_part, "last part must say it is last")
+# the final part reports what the bounded frontier elided, and how to expand
+check(re.search(r"Frontier: \d+ of [\d,]+ memories shown raw; .*zoom \d+-\d+",
+                last_part),
+      "the last part does not report the elided frontier:\n" + last_part)
 check(run("wake", str(len(parts) + 1)).returncode == 1, "a nonexistent part should fail")
 
 # append-only: nothing was ever rewritten
@@ -785,6 +799,10 @@ check(r.returncode == 0 and "#7 " in r.stdout, "recall missed a memory")
 check("1 match." in r.stdout, "a single match is not `1 matches`: " + r.stdout)
 r = run("recall", "^#7 ")
 check("memory number 7," in r.stdout, "recall cannot find a memory by id")
+# a query the shell split into words is rejoined, not rejected
+r = run("recall", "memory", "number", "7,")
+check(r.returncode == 0 and "#7 " in r.stdout,
+      "recall did not rejoin a shell-split query: " + r.stdout + r.stderr)
 r = run("recall", "2020-01-02")
 check("#7 " in r.stdout and "5 matches." in r.stdout,
       "recall cannot find memories by date: " + r.stdout)
@@ -868,16 +886,95 @@ invalid_amend = run("amend", "99", "Impossible target.", store=life)
 check(invalid_amend.returncode == 1
       and os.path.getsize(os.path.join(life, "LOG.txt")) == before_invalid,
       "amend accepted a missing ID or changed the log")
+# supersession outlives compression: a summary-block target is a first-class
+# lifecycle record, and every raw memory inside the range shows it later
+block_amend = run("amend", "0-1", "Superseding the summarized pair.",
+                  store=life)
+check(block_amend.returncode == 0 and "Amended #0-#1" in block_amend.stdout,
+      "amend of a block was refused: " + block_amend.stdout + block_amend.stderr)
+for inner in ("0", "1"):
+    covered = run("show", inner, store=life)
+    check("Amends #0-#1: Superseding the summarized pair." in covered.stdout,
+          "show %s does not list the covering block supersession:\n"
+          % inner + covered.stdout)
+check(run("amend", "3-9", "Not a block.", store=life).returncode == 1,
+      "amend accepted a non-block range")
+check(run("amend", "1024-2047", "Beyond the log.", store=life).returncode == 1,
+      "amend accepted a block beyond the log")
 check(run("amend", "0", "   ", store=life).returncode == 1
       and run("retract", "0", "   ", store=life).returncode == 1,
       "lifecycle commands accepted an empty replacement/reason")
+
+# ---- provenance -------------------------------------------------------
+# Every written entry is stamped with the session's @tag inside its payload,
+# so wake, recall, show, and nap prompts display authorship for free, and a
+# parallel session's entries are visibly its testimony.
+check(cli.log_get(life, 0)[2] == "@t1 Mutation requests may be retried.",
+      "a note was not stamped with the session tag: "
+      + cli.log_get(life, 0)[2])
+prov = tempfile.mkdtemp(prefix="optmem-provenance-")
+os.makedirs(os.path.join(prov, "TREE"))
+open(os.path.join(prov, "LOG.txt"), "wb").close()
+other = subprocess.run(
+    memo + ["note", "Written by a parallel session."],
+    capture_output=True, text=True,
+    env=dict(os.environ, MEMORY_DIR=prov, OPTMEM_SESSION="other-2"))
+check(other.returncode == 0
+      and cli.log_get(prov, 0)[2]
+      == "@other-2 Written by a parallel session.",
+      "a second session's tag did not distinguish its entries: "
+      + other.stdout + other.stderr)
+run("note", "Written by the test session.", store=prov)
+both = run("recall", "session", store=prov)
+check("@other-2 " in both.stdout and "@t1 " in both.stdout,
+      "recall does not show which session wrote each entry:\n" + both.stdout)
+# a hostile or overlong OPTMEM_SESSION is sanitized, never trusted
+weird = subprocess.run(
+    memo + ["note", "Sanitized tag."], capture_output=True, text=True,
+    env=dict(os.environ, MEMORY_DIR=prov,
+             OPTMEM_SESSION="a b/c\\d:e|f&g<h>i j-k_9longtail"))
+check(weird.returncode == 0
+      and cli.log_get(prov, 2)[2].startswith("@abcdefgh "),
+      "OPTMEM_SESSION was not sanitized: " + cli.log_get(prov, 2)[2])
+# without OPTMEM_SESSION the tag is derived, or dropped -- never a failure
+derived_env = {k: v for k, v in os.environ.items() if k != "OPTMEM_SESSION"}
+derived_env["MEMORY_DIR"] = prov
+derived = subprocess.run(memo + ["note", "Derived-tag entry."],
+                         capture_output=True, text=True, env=derived_env)
+check(derived.returncode == 0 and "Saved as #3" in derived.stdout
+      and re.fullmatch(r"(@[\w-]{1,8} )?Derived-tag entry\.",
+                       cli.log_get(prov, 3)[2]),
+      "a note without OPTMEM_SESSION failed or wrote a malformed tag: "
+      + derived.stdout + derived.stderr + cli.log_get(prov, 3)[2])
+# a maximum-length entry still fits the fixed-width record with its tag
+maximal = "m" * 280
+full_note = run("note", maximal, store=prov)
+check(full_note.returncode == 0
+      and cli.log_get(prov, 4)[2].endswith(maximal),
+      "a maximum-length note was refused or truncated by tagging")
+
+# ---- note --fit -------------------------------------------------------
+wordy = ("alpha bravo charlie " * 20).strip()   # 399 bytes of whole words
+fitted = run("note", "--fit", wordy, store=prov)
+check(fitted.returncode == 0 and "Fitted: cut the last" in fitted.stdout
+      and "word boundary" in fitted.stdout,
+      "note --fit did not trim and report: " + fitted.stdout + fitted.stderr)
+kept = cli.log_get(prov, 5)[2]
+kept_text = kept.split(" ", 1)[1] if kept.startswith("@") else kept
+check(len(kept_text.encode()) <= 280 and not kept_text.endswith(" ")
+      and wordy.startswith(kept_text)
+      and wordy[len(kept_text):].startswith(" "),
+      "note --fit did not cut at a word boundary: %r" % kept_text)
+check(run("note", "--fit", "under the limit already", store=prov)
+      .stdout.count("Fitted") == 0,
+      "note --fit warned about a line that already fits")
 
 portable = os.path.join(life, "portable.txt")
 inspection = os.path.join(life, "inspection.txt")
 check(run("export", portable, store=life).returncode == 0
       and open(portable, encoding="utf-8").read().startswith(
-          datetime.date.today().isoformat() + " Mutation"),
-      "default export is not portable")
+          datetime.date.today().isoformat() + " @t1 Mutation"),
+      "default export is not portable or lost the provenance tag")
 check(run("export", "--with-ids", inspection, store=life).returncode == 0
       and open(inspection, encoding="utf-8").read().startswith("#0 "),
       "inspection export omitted IDs")
@@ -889,14 +986,14 @@ os.makedirs(os.path.join(restored, "TREE"))
 open(os.path.join(restored, "LOG.txt"), "wb").close()
 dry = run("import", "--dry-run", portable, store=restored)
 check(dry.returncode == 0 and "Valid OptMem import" in dry.stdout
-      and "Amendments:    1" in dry.stdout
+      and "Amendments:    2" in dry.stdout
       and "Retractions:   1" in dry.stdout and cli.log_len(restored) == 0,
       "import --dry-run wrote data or omitted lifecycle diagnostics:\n"
       + dry.stdout + dry.stderr)
 loaded = run("import", portable, store=restored)
-check(loaded.returncode == 0 and cli.log_len(restored) == 4
-      and cli.log_get(restored, 1)[2].startswith("Amends #0:"),
-      "portable import did not preserve ordered IDs")
+check(loaded.returncode == 0 and cli.log_len(restored) == 5
+      and cli.log_get(restored, 1)[2].startswith("@t1 Amends #0:"),
+      "portable import did not preserve ordered IDs and provenance")
 loaded_bytes = open(os.path.join(restored, "LOG.txt"), "rb").read()
 second_import = run("import", portable, store=restored)
 check(second_import.returncode == 1 and "nonempty store" in second_import.stderr
@@ -977,7 +1074,7 @@ check(oversized_apply.returncode == 1 and "too large" in oversized_apply.stderr,
       "nap --apply accepted an unbounded input file")
 
 errors, warnings, records_, summaries = cli._verify_store(restored)
-check(not errors and records_ == 4 and summaries == 2,
+check(not errors and records_ == 5 and summaries == 2,
       "deep verification rejected a healthy lifecycle store: %r" % errors)
 deep = run("doctor", "--deep", store=restored)
 check(deep.returncode == 0 and "Deep verification" in deep.stdout
@@ -1138,7 +1235,7 @@ check(qmd_state == {"format": 1, "logRecords": 36, "segmentSize": 16},
       "QMD projection state is not minimal and deterministic: %r" % qmd_state)
 first_segment = open(os.path.join(projection, segments[0]),
                      encoding="utf-8").read()
-check(first_segment.startswith("#0 2026-07-01 qmd canonical memory 0\n\n")
+check(first_segment.startswith("#0 2026-07-01 @t1 qmd canonical memory 0\n\n")
       and "#15 " in first_segment and "\x00" not in first_segment,
       "QMD segment is not an unchanged logical projection of raw entries")
 
@@ -1157,7 +1254,7 @@ semantic = run("recall", "--semantic", "why did policy change?",
                store=qmd_store)
 check(semantic.returncode == 0
       and "Semantic matches in selected memory" in semantic.stdout
-      and "#18 2026-07-05 qmd canonical memory 18" in semantic.stdout
+      and "#18 2026-07-05 @t1 qmd canonical memory 18" in semantic.stdout
       and "#35 " in semantic.stdout
       and "text supplied by QMD must not be trusted" not in semantic.stdout,
       "semantic recall did not resolve QMD hits through canonical LOG.txt:\n"
@@ -1694,7 +1791,8 @@ def fingerprint(path):
 # nothing is recomputed, because a size only selects what gets printed.
 r = run("config", "WAKE_LINES=12")
 check("12" in r.stdout and "default 208" in r.stdout, "config did not set:\n" + r.stdout)
-check(len(run("wake").stdout.splitlines()) <= 13, "wake ignored the new size")
+check(len(run("wake").stdout.splitlines()) <= 14,  # content + frontier + awake
+      "wake ignored the new size")
 r = run("config", "WAKE_LINES=")
 check("default" not in r.stdout, "an empty value did not restore the default")
 check(len(run("wake").stdout.splitlines()) > 13, "the default did not come back")
