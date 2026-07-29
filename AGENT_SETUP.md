@@ -133,6 +133,13 @@ self-contained:
 memo note "The API client retries 429 responses with capped exponential backoff."
 ```
 
+An over-long line reports the exact suffix to cut; `--fit` (on `note`,
+`amend`, and `retract`) trims at a word boundary instead and prints what was
+dropped. Every written entry is stamped with an opaque `@session` tag so
+parallel sessions can tell their own observations from another session's
+testimony; set `OPTMEM_SESSION` to name the tag, and `memo doctor` shows the
+active one.
+
 Every raw memory has a stable `#ID`. An agent may cite an earlier `#ID` in a
 later note when that makes a durable fact, decision, or reason precise. When a
 claim changes, preserve the chronology instead of silently contradicting it:
@@ -145,7 +152,10 @@ memo retract 42 "Obsolete after the HTTP client rewrite."
 
 `amend` appends a corrected replacement. `retract` appends that the earlier
 memory is no longer authoritative. Both keep the original as useful history,
-and later lifecycle records override it during compression. `redact` is not an
+and later lifecycle records override it during compression. When the
+authoritative statement already lives in a compressed summary line `#a-b`,
+target the block itself — `memo amend a-b "..."` — and `memo show a-b` (or
+`show` on any raw memory inside it) lists the supersession. `redact` is not an
 agent correction tool: it physically erases a payload and should only be run
 when the user explicitly requests removal of sensitive text.
 

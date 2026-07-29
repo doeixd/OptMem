@@ -91,6 +91,17 @@ memo import --dry-run .\memories.txt
 ```
 
 For large restores, `memo nap --batch 8` prints independent compression jobs.
+
+Quote recall patterns in PowerShell — prefer single quotes, since an unquoted
+`|` is consumed by the shell as a pipeline before `memo` runs (a split
+multi-word query is rejoined automatically, but a pipe cannot be recovered):
+
+```powershell
+memo recall 'activation|handoff'
+```
+
+Entries are stamped with an opaque `@session` tag; set `$env:OPTMEM_SESSION`
+to name it, and `memo doctor` reports the active tag and its source.
 Write its requested TAB-separated summaries to a UTF-8 file and apply all of
 them with `memo nap --apply .\summaries.txt`.
 

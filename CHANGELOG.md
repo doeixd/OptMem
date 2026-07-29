@@ -1,5 +1,51 @@
 # Changelog
 
+## 2.0.1 — 2026-07-29
+
+### Configurable sizes
+
+- `RAW_MAX` is now a per-store knob: how many raw memories one compression
+  prompt shows before a block merges from its two half summaries (default 16,
+  range 2–256). A reading preference — change it any time.
+- `LOG_REC` and `TREE_REC` are per-store knobs too, which is how a store can
+  hold entries longer than 280 bytes (`ENTRY_CHARS` is capped at
+  `min(TREE_REC - 8, LOG_REC - 40)`). They are physical record widths:
+  `config` refuses to change them once the store holds records — export,
+  create a fresh store with the new widths, and import there. Cross-store
+  status lines (doctor) read each store's own width leniently.
+
+### Workflow
+
+- `--fit` now also works on `amend` and `retract`, computed against the bytes
+  that actually remain after the `Amends #a-#b: ` reference prefix — closing
+  the rejection loop exactly where the budget is tightest.
+- `show <lo>-<hi>` opens a summary block: its summary line, then the later
+  records that supersede it. Blocks are now symmetric as amend targets and as
+  questions.
+- `memo doctor` reports the active session tag and its source
+  (`OPTMEM_SESSION`, harness process, terminal, or none), making silent
+  untagged fallbacks diagnosable.
+
+### Provenance robustness
+
+- Terminal multiplexer and remote-login daemons (`tmux`, `screen`, `sshd`)
+  are treated as shared, not stable, ancestors: stopping the ancestry walk at
+  a tmux server would hand every parallel pane the same tag. When only shared
+  ancestors exist, the controlling terminal identifies the session instead;
+  with neither, entries are written untagged rather than falsely identical.
+- Declared ctypes argument types for the Windows process APIs, so
+  pointer-sized handles are no longer at risk of truncation silently
+  producing untagged entries.
+
+### Documentation
+
+- README: human-facing provenance and block-supersession sections, including
+  the honest limits — tags are cooperative claims, not authenticated
+  identities; legacy text beginning `@word ` reads as tagged; import
+  tolerates non-block `#a-#b` ranges from foreign histories.
+- AGENT_SETUP.md and WINDOWS.md now cover `--fit`, block supersession,
+  session tags, and the PowerShell recall-quoting rule.
+
 ## 2.0.0 — 2026-07-29
 
 ### Provenance
