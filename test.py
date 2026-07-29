@@ -1007,6 +1007,82 @@ check(run("note", "--fit", "under the limit already", store=prov)
       .stdout.count("Fitted") == 0,
       "note --fit warned about a line that already fits")
 
+# ---- backfilled dates -------------------------------------------------
+# --date backfills a real past day; the log stays chronologically ordered.
+dated = tempfile.mkdtemp(prefix="optmem-dated-")
+os.makedirs(os.path.join(dated, "TREE"))
+open(os.path.join(dated, "LOG.txt"), "wb").close()
+check(run("note", "--date", "2026-01-05", "Backfilled fact.",
+          store=dated).returncode == 0
+      and cli.log_get(dated, 0)[1] == "2026-01-05",
+      "note --date did not backfill the entry date")
+check(run("note", "--date", "2026-01-04", "Regressing.",
+          store=dated).returncode == 1,
+      "--date was allowed to precede the newest memory")
+check(run("note", "--date", "2099-01-01", "Future.",
+          store=dated).returncode == 1,
+      "--date accepted a future day")
+check(run("note", "--date", "2026-02-30", "Unreal.",
+          store=dated).returncode == 1,
+      "--date accepted an impossible day")
+check(run("note", "--date=2026-01-06", "Equals form.",
+          store=dated).returncode == 0
+      and cli.log_get(dated, 1)[1] == "2026-01-06",
+      "note --date=VALUE form failed")
+check(run("amend", "--date", "2026-01-07", "0", "Corrected later.",
+          store=dated).returncode == 0
+      and cli.log_get(dated, 2)[1] == "2026-01-07",
+      "amend --date did not backfill the lifecycle date")
+check(run("note", "Default day after a backfill.",
+          store=dated).returncode == 0,
+      "today's default date failed after backfilled entries")
+
+# ---- hooks ------------------------------------------------------------
+# OPTMEM_HOOK_PRE rewrites or refuses before validation; OPTMEM_HOOK_POST
+# observes the durable record. Both are environment commands, never store
+# files, so a synced store can never execute code.
+hookdir = tempfile.mkdtemp(prefix="optmem-hooks-")
+if " " not in sys.executable:
+    hook_runner = sys.executable
+elif os.name == "nt":
+    hook_runner = "py -3"
+else:
+    hook_runner = "'%s'" % sys.executable
+with open(os.path.join(hookdir, "pre_upper.py"), "w") as f:
+    f.write("import sys\nsys.stdout.write(sys.stdin.read().strip().upper())\n")
+with open(os.path.join(hookdir, "pre_veto.py"), "w") as f:
+    f.write("import sys\nsys.stderr.write('secret detected')\nsys.exit(3)\n")
+seen_txt = os.path.join(hookdir, "post_seen.txt")
+with open(os.path.join(hookdir, "post_record.py"), "w") as f:
+    f.write("import sys\nopen(%r, 'a', encoding='utf-8')"
+            ".write(sys.stdin.read())\n" % seen_txt)
+hooked = tempfile.mkdtemp(prefix="optmem-hookstore-")
+os.makedirs(os.path.join(hooked, "TREE"))
+open(os.path.join(hooked, "LOG.txt"), "wb").close()
+os.environ["OPTMEM_HOOK_PRE"] = '%s "%s"' % (
+    hook_runner, os.path.join(hookdir, "pre_upper.py"))
+os.environ["OPTMEM_HOOK_POST"] = '%s "%s"' % (
+    hook_runner, os.path.join(hookdir, "post_record.py"))
+try:
+    r = run("note", "hooked entry", store=hooked)
+    check(r.returncode == 0
+          and cli.log_get(hooked, 0)[2] == "@t1 HOOKED ENTRY",
+          "the pre hook did not rewrite the memory: "
+          + cli.log_get(hooked, 0)[2] if cli.log_len(hooked) else r.stderr)
+    observed = open(seen_txt, encoding="utf-8").read()
+    check(observed.startswith("#0 ") and "@t1 HOOKED ENTRY" in observed,
+          "the post hook did not receive the written record: %r" % observed)
+    os.environ["OPTMEM_HOOK_PRE"] = '%s "%s"' % (
+        hook_runner, os.path.join(hookdir, "pre_veto.py"))
+    r = run("note", "should be refused", store=hooked)
+    check(r.returncode == 1 and "refused" in r.stderr
+          and "secret detected" in r.stderr and cli.log_len(hooked) == 1,
+          "a vetoing pre hook did not refuse the write: "
+          + r.stdout + r.stderr)
+finally:
+    os.environ.pop("OPTMEM_HOOK_PRE", None)
+    os.environ.pop("OPTMEM_HOOK_POST", None)
+
 portable = os.path.join(life, "portable.txt")
 inspection = os.path.join(life, "inspection.txt")
 check(run("export", portable, store=life).returncode == 0
