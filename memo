@@ -14,10 +14,10 @@ Connect and inspect:
   {memo} wake <part> [T]         continue a paginated project-memory snapshot
 
 Remember and retrieve:
-  {memo} note [--fit] [--date YYYY-MM-DD] "<one line>"
+  {memo} note [--fit] [--date YYYY-MM-DD[THH:MM]] "<one line>"
                                  save one durable project memory; --fit trims
                                  at a word boundary, --date backfills a past
-                                 day (amend and retract accept both too)
+                                 stamp (amend and retract accept both too)
   {memo} show <id|lo-hi>         show one raw memory, or a summary block, and
                                  the later references that cover it
   {memo} amend [--fit] <id|lo-hi> "<one line>"
@@ -123,7 +123,7 @@ ME = TOOL
 
 # The memory that follows you everywhere, as opposed to the one per project.
 GLOBAL = "~/.optmem/memory"
-VERSION = "2.0.2"
+VERSION = "2.0.3"
 INSTALL_BASE = "https://github.com/doeixd/OptMem/releases/latest/download"
 SCOPE_GLOBAL = False  # set by main() from `--global`
 
@@ -1423,24 +1423,39 @@ def post_hook(record):
               % result.returncode)
 
 
+# A stamp is a date, optionally with a time: ISO order IS lexicographic
+# order, so a bare day and a timestamped moment on that day compare
+# correctly as strings, and the log's chronology check stays one `<`.
+# Timezone offsets are rejected: they would break that property.
+_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?)?")
+
+
 def entry_date(d, value):
-    """A caller-supplied entry date. The log is chronologically ordered --
-    import and deep verification enforce it -- so a custom date must be a
-    real day, not in the future, and not before the newest memory."""
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
-        die("--date takes YYYY-MM-DD, not '%s'." % value)
+    """A caller-supplied entry stamp. The log is chronologically ordered --
+    import and deep verification enforce it -- so a custom stamp must be a
+    real moment, not in the future, and not before the newest memory."""
+    if not _STAMP.fullmatch(value):
+        die("--date takes YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS] (no timezone "
+            "offset), not '%s'." % value)
     try:
-        datetime.datetime.strptime(value, "%Y-%m-%d")
+        datetime.datetime.fromisoformat(value)
     except ValueError:
-        die("%s is not a real date." % value)
-    today = datetime.date.today().isoformat()
-    if value > today:
+        die("%s is not a real %s." % (value,
+                                      "moment" if "T" in value else "date"))
+    now = datetime.datetime.now()
+    future = value[:10] > now.date().isoformat() or (
+        value[:10] == now.date().isoformat() and "T" in value and
+        value[11:] > now.strftime("%H:%M:%S"))
+    if future:
         die("--date %s is in the future. Entries stay chronological, and "
-            "tomorrow's default date must not have to regress." % value)
+            "the next default stamp must not have to regress." % value)
+    # Chronology is enforced by DAY: a bare date and a timestamped moment
+    # coexist on one day, so the time of day is informational, and only a
+    # stamp from an earlier day than the newest memory is refused.
     total = log_len(d)
     if total:
         last = log_get(d, total - 1)[1]
-        if value < last:
+        if value[:10] < last[:10]:
             die("--date %s precedes the newest memory (#%d, %s). Entries "
                 "stay chronological; the earlier context can still be named "
                 "in the text." % (value, total - 1, last))
@@ -1456,7 +1471,7 @@ def _entry_options(d, args, usage):
             fit = True
         elif arg == "--date":
             if i + 1 >= len(args):
-                die("--date needs YYYY-MM-DD.")
+                die("--date needs YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS].")
             i += 1
             date = args[i]
         elif arg.startswith("--date="):
@@ -2677,10 +2692,10 @@ def fit_entry(text, budget=None):
 
 def cmd_note(d, args):
     rest, fit, date = _entry_options(
-        d, args, "usage: %s note [--fit] [--date YYYY-MM-DD] \"<one line, "
+        d, args, "usage: %s note [--fit] [--date YYYY-MM-DD[THH:MM]] \"<one line, "
         "at most %d UTF-8 bytes>\"" % (ME, ENTRY_CHARS))
     if len(rest) != 1:
-        die("usage: %s note [--fit] [--date YYYY-MM-DD] \"<one line, at most "
+        die("usage: %s note [--fit] [--date YYYY-MM-DD[THH:MM]] \"<one line, at most "
             "%d UTF-8 bytes>\"" % (ME, ENTRY_CHARS))
     text = pre_hook(rest[0])
     text, dropped = (fit_entry(text) if fit else (text, ""))
@@ -2742,7 +2757,7 @@ def cmd_show(d, args):
 
 
 def cmd_amend(d, args):
-    usage = ("usage: %s amend [--fit] [--date YYYY-MM-DD] <id|lo-hi> "
+    usage = ("usage: %s amend [--fit] [--date YYYY-MM-DD[THH:MM]] <id|lo-hi> "
              "\"<corrected replacement>\"" % ME)
     rest, fit, date = _entry_options(d, args, usage)
     if len(rest) != 2:
@@ -2751,7 +2766,7 @@ def cmd_amend(d, args):
 
 
 def cmd_retract(d, args):
-    usage = ("usage: %s retract [--fit] [--date YYYY-MM-DD] <id|lo-hi> "
+    usage = ("usage: %s retract [--fit] [--date YYYY-MM-DD[THH:MM]] <id|lo-hi> "
              "\"<reason>\"" % ME)
     rest, fit, date = _entry_options(d, args, usage)
     if len(rest) != 2:
@@ -3475,7 +3490,7 @@ def fff_recall(d, query, limit=None):
         if os.path.basename(match.relative_path).lower() != "log.txt":
             continue
         line = match.line_content.rstrip()
-        if re.match(r"^#\d+ \d{4}-\d{2}-\d{2} ", line):
+        if re.match(r"^#\d+ \d{4}-\d{2}-\d{2}(?:T[\d:]+)? ", line):
             ranked.append((match.fuzzy_score or 0, match.line_number, line))
     ranked.sort(key=lambda hit: (hit[0], hit[1]), reverse=True)
 
@@ -3889,14 +3904,15 @@ def _parse_import(path):
         if not line.strip():
             continue
         date, _, text = line.partition(" ")
-        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
-            die("line %d: expected 'YYYY-MM-DD <text>', got: %s" % (i, line))
+        if not _STAMP.fullmatch(date):
+            die("line %d: expected 'YYYY-MM-DD[THH:MM[:SS]] <text>', got: %s"
+                % (i, line))
         try:
-            datetime.datetime.strptime(date, "%Y-%m-%d")
+            datetime.datetime.fromisoformat(date)
         except ValueError:
             die("line %d: %s is not a real date." % (i, date))
-        if date < last:
-            die("line %d: date %s precedes the previous memory (%s)."
+        if date[:10] < last[:10]:
+            die("line %d: date %s precedes the previous memory's day (%s)."
                 % (i, date, last))
         text = text.strip()
         # A leading @session tag is provenance, not payload: an exported
@@ -4097,13 +4113,17 @@ def _verify_store(d):
             if ident != expected:
                 errors.append("LOG.txt position #%d identifies itself as #%d"
                               % (expected, ident))
-            try:
-                datetime.date.fromisoformat(date)
-            except ValueError:
+            stamp_ok = bool(_STAMP.fullmatch(date))
+            if stamp_ok:
+                try:
+                    datetime.datetime.fromisoformat(date)
+                except ValueError:
+                    stamp_ok = False
+            if not stamp_ok:
                 errors.append("memory #%d has invalid date %s"
                               % (expected, date))
-            if previous_date is not None and date < previous_date:
-                errors.append("memory #%d date %s precedes %s"
+            if previous_date is not None and date[:10] < previous_date[:10]:
+                errors.append("memory #%d date %s precedes day %s"
                               % (expected, date, previous_date))
             previous_date = date
             if not text:

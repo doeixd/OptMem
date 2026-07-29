@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.0.3 — 2026-07-29
+
+- `--date` accepts a timestamp: `YYYY-MM-DDTHH:MM[:SS]`, no timezone offset
+  (ISO order is lexicographic order, and an offset would break it). Bare
+  dates stay the compact default. Chronology is enforced by day — a bare
+  date and a timestamped moment coexist on one day, so time of day is
+  informational — and import, deep verification, and fuzzy recall all accept
+  timestamped records.
+- No show/read hook, deliberately: write hooks exist because writes happen
+  inside the tool where a pipe cannot intervene, while reading is already
+  composable at the shell (`memo recall ... | your-filter`), and a display
+  hook could corrupt the wake protocol agents depend on verbatim.
+
 ## 2.0.2 — 2026-07-29
 
 - `note`, `amend`, and `retract` accept `--date YYYY-MM-DD` to backfill an

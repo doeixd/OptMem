@@ -15,6 +15,24 @@ See the [changelog](CHANGELOG.md) for release history.
 
 ![how OptMem works](anim/optmem.gif)
 
+## This fork vs. the original
+
+Everything below reads and extends a 1.x store in place — no migration. The
+"original" column describes upstream as of its last common release (1.1.1).
+
+| Capability | Original | This fork (2.x) |
+|---|---|---|
+| Session provenance | — | every written entry is stamped `@tag` (from `OPTMEM_SESSION`, or derived from the harness process / terminal); parallel sessions are distinguishable in `wake`, `recall`, and compression prompts, and `doctor` names the active tag |
+| Superseding compressed history | `amend`/`retract` target one raw `#ID` | block targets too: `amend a-b` writes `Amends #a-#b:`, and `show a-b` (or `show` on any raw memory inside) lists the supersession |
+| Over-long entries | rejected with a byte count | the error names the exact suffix to cut, and `--fit` (on `note`, `amend`, `retract`) trims at a word boundary and reports the cut |
+| Entry dates | always today | `--date` backfills a past day or timestamp (`YYYY-MM-DD[THH:MM[:SS]]`), chronology enforced by day |
+| Hooks | — | `OPTMEM_HOOK_PRE` rewrites or refuses a memory before writing; `OPTMEM_HOOK_POST` observes the written record — environment variables, never store files |
+| Entry length | 280 bytes, fixed | per-store record widths (`LOG_REC`/`TREE_REC`, set while empty) raise `ENTRY_CHARS` past 280; documented widening migration |
+| Merge granularity | fixed at 16 | `RAW_MAX` is a per-store knob (2–256) |
+| Waking up | bounded frontier | plus a trailer naming how much was elided and the largest block to `zoom` |
+| Concurrent sessions | numbered `nap` form is the documented path | bare `nap` is the documented recovery; the wrong-block error names the parallel-session cause; prompts mark other sessions' entries as testimony |
+| Windows ergonomics | — | shell-split recall queries are rejoined; quoting rules documented in `WINDOWS.md` and the usage error |
+
 ## Installation
 
 Prerequisite: Python 3.7 or newer. FFF-powered fuzzy recall is optional and
@@ -202,7 +220,7 @@ commands such as `scope` and `doctor` never create the marker or a store.
 | `memo qmd config [FALLBACK=on\|off]` | inspect or opt into semantic fallback after exact and FFF misses |
 | `memo qmd disable [--purge]` | disable QMD; optionally remove its projection |
 | `memo wake` | read both memories — global, then project; first command of every session |
-| `memo note [--fit] [--date YYYY-MM-DD] "..."` | record one memory: one line, up to 280 UTF-8 bytes (project by default); `--fit` trims at a word boundary, `--date` backfills a past day (also on `amend`/`retract`) |
+| `memo note [--fit] [--date YYYY-MM-DD[THH:MM]] "..."` | record one memory: one line, up to 280 UTF-8 bytes (project by default); `--fit` trims at a word boundary, `--date` backfills a past day or moment (also on `amend`/`retract`) |
 | `memo show <id\|lo-hi>` | show one canonical raw memory — or a summary block — and later records that reference it |
 | `memo amend [--fit] <id\|lo-hi> "..."` | append a corrected replacement; a `lo-hi` block supersedes an already-compressed range |
 | `memo retract [--fit] <id\|lo-hi> "<reason>"` | append that an earlier memory or summarized range is no longer authoritative |
@@ -290,11 +308,13 @@ not authenticated identities — any process may set `OPTMEM_SESSION` to any
 value; when no stable identity exists, entries are simply written untagged;
 and a pre-2.0 entry whose text happened to begin `@word ` reads as if tagged.
 
-An entry's date defaults to today. `--date YYYY-MM-DD` backfills a real past
-day — useful when recording something learned earlier — but the log stays
-chronologically ordered: the date may not be in the future and may not
-precede the newest memory. To reference an out-of-order past event, name it
-in the text instead.
+An entry's date defaults to today. `--date` backfills a real past day
+(`YYYY-MM-DD`) or moment (`YYYY-MM-DDTHH:MM[:SS]`, no timezone offset — ISO
+order is lexicographic order, and an offset would break it) — useful when
+recording something learned earlier. The log stays chronological by day: the
+stamp may not be in the future and may not precede the newest memory's day,
+while time of day is informational, so bare dates and timestamps coexist. To
+reference an out-of-order past event, name it in the text instead.
 
 `redact` is intentionally different and requires `--force`: it replaces the
 payload with `[REDACTED BY USER]`, preserves the ID and date, invalidates

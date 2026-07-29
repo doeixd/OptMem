@@ -1037,6 +1037,42 @@ check(run("note", "Default day after a backfill.",
           store=dated).returncode == 0,
       "today's default date failed after backfilled entries")
 
+# --date also takes a timestamp; chronology is enforced by DAY, so bare
+# dates and timestamped moments coexist and time of day is informational
+timed = tempfile.mkdtemp(prefix="optmem-timed-")
+os.makedirs(os.path.join(timed, "TREE"))
+open(os.path.join(timed, "LOG.txt"), "wb").close()
+check(run("note", "--date", "2026-03-01T10:30", "Timestamped.",
+          store=timed).returncode == 0
+      and cli.log_get(timed, 0)[1] == "2026-03-01T10:30",
+      "note --date did not store a timestamp")
+check(run("note", "--date", "2026-03-01", "Bare date, same day.",
+          store=timed).returncode == 0,
+      "a bare date was refused after a same-day timestamp")
+check(run("note", "--date", "2026-03-01T09:00:05", "Earlier same day.",
+          store=timed).returncode == 0,
+      "a same-day earlier timestamp was refused (time is informational)")
+check(run("note", "--date", "2026-02-28T23:59", "Earlier day.",
+          store=timed).returncode == 1,
+      "--date accepted an earlier day via timestamp")
+check(run("note", "--date", "2026-03-01T25:00", "Bad hour.",
+          store=timed).returncode == 1,
+      "--date accepted hour 25")
+check(run("note", "--date", "2026-03-01T10:00+02:00", "Offset.",
+          store=timed).returncode == 1,
+      "--date accepted a timezone offset")
+timed_errors, _, _, _ = cli._verify_store(timed)
+check(not timed_errors,
+      "deep verification rejected timestamped records: %r" % timed_errors)
+timed_export = os.path.join(timed, "timed.txt")
+run("export", timed_export, store=timed)
+timed_restore = tempfile.mkdtemp(prefix="optmem-timed-restore-")
+os.makedirs(os.path.join(timed_restore, "TREE"))
+open(os.path.join(timed_restore, "LOG.txt"), "wb").close()
+check(run("import", timed_export, store=timed_restore).returncode == 0
+      and cli.log_get(timed_restore, 0)[1] == "2026-03-01T10:30",
+      "timestamped records did not survive an export/import round trip")
+
 # ---- hooks ------------------------------------------------------------
 # OPTMEM_HOOK_PRE rewrites or refuses before validation; OPTMEM_HOOK_POST
 # observes the durable record. Both are environment commands, never store
