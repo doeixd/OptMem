@@ -37,8 +37,7 @@ def complete(T):
 
 # The shipped defaults. A fresh process starts from these, so an in-process
 # call must too, or one store's config would leak into the next.
-DEFAULTS = {k: getattr(cli, k) for k in
-            ("ENTRY_CHARS", "WAKE_LINES", "PART_CHARS", "PART_LINES")}
+DEFAULTS = {k: getattr(cli, k) for k in cli.KNOBS}
 
 N = 2000
 WAKE_LINES = cli.WAKE_LINES   # the shipped budget, not a second copy of it
@@ -192,7 +191,7 @@ check(helped.returncode == 0 and "Usage:" in helped.stdout
       and "scope" in helped.stdout and "doctor" in helped.stdout
       and "qmd [help]" in helped.stdout
       and "recall [options]" in helped.stdout
-      and "amend <id|lo-hi>" in helped.stdout
+      and "amend [--fit] <id|lo-hi>" in helped.stdout
       and "note [--fit]" in helped.stdout
       and "resummarize" in helped.stdout and "export [--with-ids]" in
           helped.stdout,
@@ -901,6 +900,45 @@ check(run("amend", "3-9", "Not a block.", store=life).returncode == 1,
       "amend accepted a non-block range")
 check(run("amend", "1024-2047", "Beyond the log.", store=life).returncode == 1,
       "amend accepted a block beyond the log")
+# a block is also a first-class question: its summary and what supersedes it
+block_shown = run("show", "0-1", store=life)
+check(block_shown.returncode == 0
+      and block_shown.stdout.startswith("#0-1 not compressed yet")
+      and "Amends #0-#1: Superseding the summarized pair." in
+          block_shown.stdout,
+      "show of a block did not list its supersession:\n" + block_shown.stdout)
+check(run("show", "3-9", store=life).returncode == 1,
+      "show accepted a non-block range")
+# --fit works where the budget is tightest: after the lifecycle prefix
+long_fix = ("delta echo foxtrot " * 20).strip()
+fit_amend = run("amend", "--fit", "0-1", long_fix, store=life)
+check(fit_amend.returncode == 0 and "Fitted: cut the last" in fit_amend.stdout,
+      "amend --fit did not trim and report: "
+      + fit_amend.stdout + fit_amend.stderr)
+fitted_entry = cli.log_get(life, cli.log_len(life) - 1)[2]
+fitted_body = fitted_entry.split(" ", 1)[1] \
+    if fitted_entry.startswith("@") else fitted_entry
+check(len(fitted_body.encode()) <= 280
+      and fitted_body.startswith("Amends #0-#1: delta echo")
+      and not fitted_body.endswith(" "),
+      "amend --fit produced an invalid lifecycle record: %r" % fitted_body)
+check(run("amend", "0", long_fix, store=life).returncode == 1,
+      "an over-long amend without --fit was accepted")
+check(run("retract", "--fit", "0", long_fix, store=life).returncode == 0,
+      "retract --fit was refused")
+
+# doctor names the active session tag and its source
+diagnosed_tag = run("doctor", store=life)
+check("Session tag:   @t1 (OPTMEM_SESSION)" in diagnosed_tag.stdout,
+      "doctor does not report the session tag:\n" + diagnosed_tag.stdout)
+# shared multiplexer/daemon ancestors are never a session identity
+for shared in ("tmux", "tmux: server", "screen", "sshd", "sshd-session",
+               "/usr/sbin/sshd", "bash", "pwsh.exe", "python3"):
+    check(cli._transient_ancestor(shared),
+          "%r was accepted as a stable session ancestor" % shared)
+check(not cli._transient_ancestor("node.exe")
+      and not cli._transient_ancestor("claude"),
+      "a harness process was wrongly treated as transient")
 check(run("amend", "0", "   ", store=life).returncode == 1
       and run("retract", "0", "   ", store=life).returncode == 1,
       "lifecycle commands accepted an empty replacement/reason")
@@ -986,12 +1024,12 @@ os.makedirs(os.path.join(restored, "TREE"))
 open(os.path.join(restored, "LOG.txt"), "wb").close()
 dry = run("import", "--dry-run", portable, store=restored)
 check(dry.returncode == 0 and "Valid OptMem import" in dry.stdout
-      and "Amendments:    2" in dry.stdout
-      and "Retractions:   1" in dry.stdout and cli.log_len(restored) == 0,
+      and "Amendments:    3" in dry.stdout
+      and "Retractions:   2" in dry.stdout and cli.log_len(restored) == 0,
       "import --dry-run wrote data or omitted lifecycle diagnostics:\n"
       + dry.stdout + dry.stderr)
 loaded = run("import", portable, store=restored)
-check(loaded.returncode == 0 and cli.log_len(restored) == 5
+check(loaded.returncode == 0 and cli.log_len(restored) == 7
       and cli.log_get(restored, 1)[2].startswith("@t1 Amends #0:"),
       "portable import did not preserve ordered IDs and provenance")
 loaded_bytes = open(os.path.join(restored, "LOG.txt"), "rb").read()
@@ -1074,7 +1112,7 @@ check(oversized_apply.returncode == 1 and "too large" in oversized_apply.stderr,
       "nap --apply accepted an unbounded input file")
 
 errors, warnings, records_, summaries = cli._verify_store(restored)
-check(not errors and records_ == 5 and summaries == 2,
+check(not errors and records_ == 7 and summaries == 2,
       "deep verification rejected a healthy lifecycle store: %r" % errors)
 deep = run("doctor", "--deep", store=restored)
 check(deep.returncode == 0 and "Deep verification" in deep.stdout
@@ -1796,8 +1834,55 @@ check(len(run("wake").stdout.splitlines()) <= 14,  # content + frontier + awake
 r = run("config", "WAKE_LINES=")
 check("default" not in r.stdout, "an empty value did not restore the default")
 check(len(run("wake").stdout.splitlines()) > 13, "the default did not come back")
-for bad in ("WAKE_LINES=0", "WAKE_LINES=x", "ENTRY_CHARS=999", "NOPE=1", "WAKE_LINES"):
+for bad in ("WAKE_LINES=0", "WAKE_LINES=x", "ENTRY_CHARS=999", "NOPE=1",
+            "WAKE_LINES", "RAW_MAX=1", "RAW_MAX=257", "LOG_REC=63"):
     check(run("config", bad).returncode == 1, "config accepted %s" % bad)
+
+# Record widths are per-store and PHYSICAL: they unlock longer entries, but
+# only an empty store may set them -- position is identity in LOG.txt.
+check(run("config", "LOG_REC=640").returncode == 1,
+      "a nonempty store changed its physical record width")
+wide = tempfile.mkdtemp(prefix="optmem-wide-")
+os.makedirs(os.path.join(wide, "TREE"))
+open(os.path.join(wide, "LOG.txt"), "wb").close()
+check(run("config", "ENTRY_CHARS=560", store=wide).returncode == 1,
+      "ENTRY_CHARS exceeded the default record widths")
+r = run("config", "LOG_REC=640", "TREE_REC=576", "ENTRY_CHARS=560",
+        store=wide)
+check(r.returncode == 0 and "640" in r.stdout,
+      "an empty store could not widen its records: " + r.stderr)
+long_text = "w" * 555
+check(run("note", long_text, store=wide).returncode == 0,
+      "a widened store refused a 555-byte entry")
+check(cli.log_get(wide, 0)[2].endswith(long_text)
+      and os.path.getsize(os.path.join(wide, "LOG.txt")) == 640,
+      "a widened store did not write its configured record width")
+check(long_text in run("show", "0", store=wide).stdout,
+      "a widened store cannot read back its long entry")
+check(run("config", "LOG_REC=320", store=wide).returncode == 1
+      and run("config", "LOG_REC=", store=wide).returncode == 1,
+      "a store holding records changed or reset its width")
+run("note", "wide second entry", store=wide)
+wide_summary = "wide summary " + "s" * 400   # over 280, within 560
+r = run("nap", "0-1", wide_summary, store=wide)
+check(r.returncode == 0 and "0-1 saved" in r.stdout
+      and wide_summary in run("show", "0-1", store=wide).stdout,
+      "a widened TREE record refused a long summary: " + r.stdout + r.stderr)
+
+# RAW_MAX bounds how many raw memories one merge prompt shows: above it,
+# a block merges from its two half summaries instead.
+narrow = tempfile.mkdtemp(prefix="optmem-narrow-")
+os.makedirs(os.path.join(narrow, "TREE"))
+open(os.path.join(narrow, "LOG.txt"), "wb").close()
+run("config", "RAW_MAX=2", store=narrow)
+for i in range(4):
+    run("note", "narrow entry %d" % i, store=narrow)
+run("nap", "0-1", "first narrow half", store=narrow)
+prompt = run("nap", "2-3", "second narrow half", store=narrow).stdout
+check("#0-1 first narrow half" in prompt
+      and "#2-3 second narrow half" in prompt
+      and "#0 " not in prompt,
+      "RAW_MAX=2 still merged a 4-block from raw entries:\n" + prompt)
 
 with open(os.path.join(d, "config"), "a") as f:
     f.write("WAKE_LINES=120\n")          # a size the user tuned by hand

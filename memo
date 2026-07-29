@@ -17,11 +17,12 @@ Remember and retrieve:
   {memo} note [--fit] "<one line>"
                                  save one durable project memory; --fit trims
                                  an over-long line at a word boundary
-  {memo} show <id>               show one raw memory and later references
-  {memo} amend <id|lo-hi> "<one line>"
+  {memo} show <id|lo-hi>         show one raw memory, or a summary block, and
+                                 the later references that cover it
+  {memo} amend [--fit] <id|lo-hi> "<one line>"
                                  append a corrected replacement; a lo-hi block
                                  supersedes an already-compressed range
-  {memo} retract <id|lo-hi> "<reason>"
+  {memo} retract [--fit] <id|lo-hi> "<reason>"
                                  mark a memory or block no longer authoritative
   {memo} recall [options] <query>
                                  exact, fuzzy, or optional semantic recall
@@ -114,7 +115,7 @@ ME = TOOL
 
 # The memory that follows you everywhere, as opposed to the one per project.
 GLOBAL = "~/.optmem/memory"
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 INSTALL_BASE = "https://github.com/doeixd/OptMem/releases/latest/download"
 SCOPE_GLOBAL = False  # set by main() from `--global`
 
@@ -126,6 +127,9 @@ KNOBS = {
     "ENTRY_CHARS": (280, "the longest one memory may be, in bytes"),
     "PART_CHARS": (20000, "output paging: largest part, in bytes"),
     "PART_LINES": (500, "output paging: largest part, in lines"),
+    "RAW_MAX": (16, "compression: merge up to this many raw memories at once"),
+    "LOG_REC": (320, "record width of LOG.txt; changeable only while empty"),
+    "TREE_REC": (288, "record width of summaries; changeable only while empty"),
 }
 WAKE_LINES = KNOBS["WAKE_LINES"][0]  # ~16k tokens of dense text, in 3 parts
 ENTRY_CHARS = KNOBS["ENTRY_CHARS"][0]
@@ -135,8 +139,7 @@ ENTRY_CHARS = KNOBS["ENTRY_CHARS"][0]
 # parts that fit all of them. These are transport limits, not memory limits.
 PART_CHARS = KNOBS["PART_CHARS"][0]
 PART_LINES = KNOBS["PART_LINES"][0]
-
-RAW_MAX = 16  # blocks up to this many memories compress from the raw log
+RAW_MAX = KNOBS["RAW_MAX"][0]
 MAX_RECALL_LIMIT = 1000
 MAX_RECALL_CONTEXT = 20
 MAX_ZOOM_DEPTH = 6
@@ -153,8 +156,10 @@ QMD_MEMORIES_PER_SEGMENT = 5
 # offset -- no scanning, no index file to keep in sync. Position IS identity:
 # memory i lives at i*LOG_REC of LOG.txt, and block [k*s,(k+1)*s) lives at
 # k*TREE_REC of TREE/<s>. Padding costs ~2x on disk and buys O(1) everywhere.
-LOG_REC = 320
-TREE_REC = 288
+# The widths are per-store knobs so a memory can hold longer entries, but
+# they are PHYSICAL: config refuses to change them once records exist.
+LOG_REC = KNOBS["LOG_REC"][0]
+TREE_REC = KNOBS["TREE_REC"][0]
 
 
 # ---------------------------------------------------------------- blocks
@@ -721,25 +726,38 @@ def store():
     return d
 
 
-def size(k, v, where=""):
+def size(k, v, where="", widths=None):
     """Validate one knob, wherever it came from: the config file or argv. A
     bad knob stops every command, so the message has to say where it is
     written -- `memo config` cannot fix a file it also refuses to read."""
     if not v.isdigit() or int(v) < 1:
         die("%s%s must be a positive whole number, not '%s'." % (where, k, v))
-    top = min(TREE_REC - 8, LOG_REC - 40)
-    if k == "ENTRY_CHARS" and int(v) > top:
-        die("%sENTRY_CHARS is at most %d: a memory has to fit the fixed-width "
-            "records." % (where, top))
-    return int(v)
+    value = int(v)
+    log_rec, tree_rec = widths if widths else (
+        KNOBS["LOG_REC"][0], KNOBS["TREE_REC"][0])
+    if k == "LOG_REC" and not 64 <= value <= 65536:
+        die("%sLOG_REC is 64 to 65536: a record holds an id, a date, a tag, "
+            "and the entry." % where)
+    if k == "TREE_REC" and not 48 <= value <= 65536:
+        die("%sTREE_REC is 48 to 65536." % where)
+    if k == "RAW_MAX" and not 2 <= value <= 256:
+        die("%sRAW_MAX is 2 to 256: blocks merge pairwise, and one merge "
+            "prompt has to fit a harness's output." % where)
+    if k == "ENTRY_CHARS":
+        top = min(tree_rec - 8, log_rec - 40)
+        if value > top:
+            die("%sENTRY_CHARS is at most %d: a memory has to fit the "
+                "fixed-width records. Raise LOG_REC and TREE_REC first "
+                "(possible only while the store is empty)." % (where, top))
+    return value
 
 
 def overrides(d):
     """The knobs this memory sets for itself, read from its `config` file."""
-    out = {}
     p = os.path.join(d, "config")
     if not os.path.exists(p):
-        return out
+        return {}
+    raw = {}
     for n, line in enumerate(open(p, encoding="utf-8"), 1):
         line = line.split("#")[0].strip()
         if "=" not in line:
@@ -750,7 +768,16 @@ def overrides(d):
         if k not in KNOBS:
             die("%s%s is not a size. Delete the line, or name one of: %s."
                 % (where, k, ", ".join(KNOBS)))
-        out[k] = size(k, v, where)
+        raw[k] = v, where
+    # The record widths bound ENTRY_CHARS, so they validate first no matter
+    # what order the file lists them in.
+    out, widths = {}, [KNOBS["LOG_REC"][0], KNOBS["TREE_REC"][0]]
+    for i, key in enumerate(("LOG_REC", "TREE_REC")):
+        if key in raw:
+            widths[i] = out[key] = size(key, raw[key][0], raw[key][1])
+    for k, (v, where) in raw.items():
+        if k not in ("LOG_REC", "TREE_REC"):
+            out[k] = size(k, v, where, widths=tuple(widths))
     return out
 
 
@@ -921,12 +948,24 @@ def locked(d):
 # its identity is hashed. Provenance is best effort: on any failure the
 # entry is simply written untagged, never refused.
 
-_SESSION_TAG = None
+_SESSION_INFO = None
 _TRANSIENT_ANCESTORS = {
     "bash", "cmd", "conhost", "dash", "fish", "ksh", "login", "memo",
     "powershell", "powershell_ise", "pwsh", "py", "python", "python3",
-    "pythonw", "sh", "tcsh", "winpty-agent", "zsh",
+    "pythonw", "script", "sh", "tcsh", "winpty-agent", "zsh",
 }
+# Multiplexer and remote-login daemons are long-lived and SHARED: under tmux
+# every pane's ancestry meets the same server process, so stopping there
+# would hand parallel sessions one identical tag -- worse than no tag.
+_SHARED_ANCESTOR_PREFIXES = ("screen", "sshd", "tmux")
+
+
+def _transient_ancestor(name):
+    base = os.path.basename(name.strip().rstrip(":")).lower()
+    if base.endswith(".exe"):
+        base = base[:-4]
+    return (base in _TRANSIENT_ANCESTORS or
+            base.startswith(_SHARED_ANCESTOR_PREFIXES))
 
 
 def _windows_ancestry():
@@ -945,8 +984,15 @@ def _windows_ancestry():
             ("szExeFile", ctypes.c_wchar * 260),
         ]
 
+    # Handles are pointer-sized: without declared argtypes/restype, ctypes
+    # passes them as 32-bit ints and a high handle value is silently
+    # truncated, which surfaces as an unexplained untagged entry.
     k32 = ctypes.windll.kernel32
+    k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
     k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    k32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Entry)]
+    k32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Entry)]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
     snapshot = k32.CreateToolhelp32Snapshot(2, 0)  # TH32CS_SNAPPROCESS
     if not snapshot or snapshot == wintypes.HANDLE(-1).value:
         return {}
@@ -967,7 +1013,11 @@ def _windows_start_time(pid):
     import ctypes
     from ctypes import wintypes
     k32 = ctypes.windll.kernel32
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     k32.OpenProcess.restype = wintypes.HANDLE
+    filetime = ctypes.POINTER(wintypes.FILETIME)
+    k32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [filetime] * 4
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
     handle = k32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
     if not handle:
         return ""
@@ -1008,10 +1058,7 @@ def _harness_identity():
             if pid not in table:
                 break
             parent, exe = table[pid]
-            name = os.path.basename(exe).lower()
-            if name.endswith(".exe"):
-                name = name[:-4]
-            if name not in _TRANSIENT_ANCESTORS:
+            if not _transient_ancestor(exe):
                 return pid, _windows_start_time(pid)
             pid = parent
         return None
@@ -1020,30 +1067,56 @@ def _harness_identity():
         if pid <= 1:
             break
         parent, name, start = _proc_entry(pid)
-        base = os.path.basename(name.strip()).lower()
-        if base not in _TRANSIENT_ANCESTORS:
+        if not _transient_ancestor(name):
             return pid, start
         pid = parent
     return None
 
 
-def session_tag():
-    """This session's opaque author tag, computed once, '' when unknowable."""
-    global _SESSION_TAG
-    if _SESSION_TAG is not None:
-        return _SESSION_TAG
+def _tty_identity():
+    """The controlling terminal as a session identity, for interactive use
+    where the ancestry ends only in shared daemons (tmux server, sshd)."""
+    if os.name == "nt":
+        return None
+    for fd in (0, 1, 2):
+        try:
+            return 0, os.ttyname(fd)
+        except OSError:
+            continue
+    return None
+
+
+def session_info():
+    """(tag, source) for this invocation, computed once; ('' , reason) when
+    no defensible identity exists -- an entry is then written untagged."""
+    global _SESSION_INFO
+    if _SESSION_INFO is not None:
+        return _SESSION_INFO
     explicit = re.sub(r"[^A-Za-z0-9_-]", "",
                       os.environ.get("OPTMEM_SESSION", ""))[:8]
     if explicit:
-        _SESSION_TAG = explicit
-        return _SESSION_TAG
+        _SESSION_INFO = explicit, "OPTMEM_SESSION"
+        return _SESSION_INFO
+    identity, source = None, "no stable session identity found"
     try:
         identity = _harness_identity()
-    except Exception:
-        identity = None
-    _SESSION_TAG = "" if identity is None else hashlib.sha256(
-        ("%d %s" % identity).encode("utf-8")).hexdigest()[:4]
-    return _SESSION_TAG
+        if identity is not None:
+            source = "derived from harness process %d" % identity[0]
+        else:
+            identity = _tty_identity()
+            if identity is not None:
+                source = "derived from terminal %s" % identity[1]
+    except Exception as e:
+        identity, source = None, "identity walk failed: %s" % e
+    tag = "" if identity is None else hashlib.sha256(
+        ("%s %s" % identity).encode("utf-8")).hexdigest()[:4]
+    _SESSION_INFO = tag, source
+    return _SESSION_INFO
+
+
+def session_tag():
+    """This session's opaque author tag, '' when unknowable."""
+    return session_info()[0]
 
 
 def log_append(d, items):
@@ -1296,7 +1369,7 @@ def _lifecycle_target(match):
     return None if hi < lo else (lo, hi)
 
 
-def _append_lifecycle(d, action, target, text):
+def _append_lifecycle(d, action, target, text, fit=False):
     span = re.fullmatch(r"#?(\d+)-#?(\d+)", target)
     if span:
         lo, hi = block_id("%s-%s" % span.groups())
@@ -1308,11 +1381,20 @@ def _append_lifecycle(d, action, target, text):
     else:
         ident = require_memory(d, target)
         ref = label = "#%d" % ident
+    dropped = ""
+    if fit:
+        # The reference prefix spends part of the byte budget, so the fit is
+        # computed against what actually remains for the replacement text.
+        prefix = len(("%s %s: " % (action, ref)).encode())
+        text, dropped = fit_entry(text, ENTRY_CHARS - prefix)
     replacement = check(text)
     full = check("%s %s: %s" % (action, ref, replacement))
     created = log_append(d, [(datetime.date.today().isoformat(), full)])
     print("%s %s with #%d." % (
         "Amended" if action == "Amends" else "Retracted", label, created))
+    if dropped:
+        print("Fitted: cut the last %d bytes at a word boundary: \"%s\""
+              % (len(dropped.encode()), dropped))
     nap = next_nap(d, created + 1)
     if nap:
         print("\n" + nap)
@@ -1503,9 +1585,9 @@ want to be worked with, this machine, your own tooling. How one project does
 something is not global, however much it feels like a lesson -- write it to
 that project. A `MEMORY_DIR` override intentionally pins commands to one store.
 
-If a line is over the byte limit, `{memo} note --fit` trims it at a word
-boundary and reports exactly what was cut; rewrite only if the cut loses
-something essential.
+If a line is over the byte limit, `--fit` on `note`, `amend`, or `retract`
+trims it at a word boundary and reports exactly what was cut; rewrite only
+if the cut loses something essential.
 
 Do not register redundant memories. Never record secrets, credentials,
 authentication material, or raw sensitive data.
@@ -1523,7 +1605,8 @@ amend the whole block: `{memo} amend <a>-<b> "<replacement>"` supersedes the
 summarized range and stays linked to every raw memory inside it. Ordinary
 memories may reference earlier `#IDs` to anchor stable facts and reasoning.
 Use `{memo} show <id>` when you need the exact record and its later
-references, including block supersessions that cover it.
+references, including block supersessions that cover it;
+`{memo} show <a>-<b>` shows a summary block and what supersedes it.
 Redaction is not correction: only the user may request it, and it exists for
 content that must actually be erased.
 
@@ -1645,7 +1728,7 @@ _memo_completion() {
             fi
             ;;
         config)
-            _memo_compgen -W "WAKE_LINES= ENTRY_CHARS= PART_CHARS= PART_LINES=" -- "$cur"
+            _memo_compgen -W "WAKE_LINES= ENTRY_CHARS= PART_CHARS= PART_LINES= RAW_MAX= LOG_REC= TREE_REC=" -- "$cur"
             ;;
         import)
             if [[ "$cur" == --* ]]; then
@@ -1737,7 +1820,7 @@ _memo() {
                 '1:output file:_files'
             ;;
         config)
-            _values 'setting' 'WAKE_LINES=' 'ENTRY_CHARS=' 'PART_CHARS=' 'PART_LINES='
+            _values 'setting' 'WAKE_LINES=' 'ENTRY_CHARS=' 'PART_CHARS=' 'PART_LINES=' 'RAW_MAX=' 'LOG_REC=' 'TREE_REC='
             ;;
         import) _arguments '--dry-run[validate without writing]' '1:memory file:_files' ;;
     esac
@@ -1797,7 +1880,7 @@ complete -c memo -n 'contains -- import (commandline -opc)' -l dry-run -d 'Valid
 complete -c memo -n 'contains -- qmd (commandline -opc)' -a 'enable status sync rebuild config disable help'
 complete -c memo -n 'contains -- qmd (commandline -opc); and contains -- config (commandline -opc)' -a 'FALLBACK=on FALLBACK=off'
 complete -c memo -n 'contains -- qmd (commandline -opc); and contains -- disable (commandline -opc)' -l purge -d 'Remove the disposable projection'
-complete -c memo -n 'contains -- config (commandline -opc)' -a 'WAKE_LINES= ENTRY_CHARS= PART_CHARS= PART_LINES='""",
+complete -c memo -n 'contains -- config (commandline -opc)' -a 'WAKE_LINES= ENTRY_CHARS= PART_CHARS= PART_LINES= RAW_MAX= LOG_REC= TREE_REC='""",
     "powershell": r"""# PowerShell completion for memo
 Register-ArgumentCompleter -Native -CommandName memo -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
@@ -1855,7 +1938,7 @@ Register-ArgumentCompleter -Native -CommandName memo -ScriptBlock {
             redact     { '--force' }
             export     { '--with-ids' }
             import     { '--dry-run' }
-            config     { 'WAKE_LINES=', 'ENTRY_CHARS=', 'PART_CHARS=', 'PART_LINES=' }
+            config     { 'WAKE_LINES=', 'ENTRY_CHARS=', 'PART_CHARS=', 'PART_LINES=', 'RAW_MAX=', 'LOG_REC=', 'TREE_REC=' }
             default    { @() }
         }
     }
@@ -2472,15 +2555,16 @@ def wake_both():
     wake_project([])
 
 
-def fit_entry(text):
+def fit_entry(text, budget=None):
     """The longest word-boundary prefix that fits, and what was cut."""
+    budget = ENTRY_CHARS if budget is None else budget
     text = text.strip()
-    if len(text.encode()) <= ENTRY_CHARS:
+    if len(text.encode()) <= budget:
         return text, ""
     keep = text
-    while " " in keep and len(keep.encode()) > ENTRY_CHARS:
+    while " " in keep and len(keep.encode()) > budget:
         keep = keep.rsplit(" ", 1)[0].rstrip()
-    while len(keep.encode()) > ENTRY_CHARS:  # one word longer than the limit
+    while len(keep.encode()) > budget:  # one word longer than the limit
         keep = keep[:-1]
     keep = keep.rstrip()
     return keep, text[len(keep):].strip()
@@ -2504,9 +2588,37 @@ def cmd_note(d, args):
         print("\n" + nap)
 
 
+def _print_later_references(d, first, references):
+    later, found = deque(maxlen=MAX_SHOW_REFERENCES), 0
+    for entry in log_scan(d):
+        if entry[0] >= first and references(entry[2]):
+            later.append(entry)
+            found += 1
+    if later:
+        print("Later references%s:" %
+              (" (latest %d of %d)" % (len(later), found)
+               if found > len(later) else ""))
+        for entry in later:
+            print("#%d %s %s" % entry)
+
+
 def cmd_show(d, args):
     if len(args) != 1:
-        die("usage: %s show <id>" % ME)
+        die("usage: %s show <id|lo-hi>" % ME)
+    span = re.fullmatch(r"#?(\d+)-#?(\d+)", args[0])
+    if span:
+        # A block is a first-class amend/retract target, so it is also a
+        # first-class question: its summary, then what supersedes it.
+        lo, hi = block_id("%s-%s" % span.groups())
+        T = log_len(d)
+        if lo >= T:
+            die("#%d-%d is beyond the memory: it holds %s. Run: %s wake"
+                % (lo, hi - 1, plural(T, "memory"), ME))
+        print("#%d-%d %s" % (lo, hi - 1,
+                             tree_get(d, lo, hi) or "not compressed yet"))
+        pattern = re.compile(r"(?<!\d)#%d-#%d(?!\d)" % (lo, hi - 1))
+        _print_later_references(d, hi, pattern.search)
+        return
     ident = require_memory(d, args[0])
     print("#%d %s %s" % log_get(d, ident))
     pattern = re.compile(r"(?<!\d)#%d(?!\d)" % ident)
@@ -2518,29 +2630,24 @@ def cmd_show(d, args):
         return any(int(m.group(1)) <= ident <= int(m.group(2))
                    for m in spans.finditer(text))
 
-    later, found = deque(maxlen=MAX_SHOW_REFERENCES), 0
-    for entry in log_scan(d):
-        if entry[0] > ident and references(entry[2]):
-            later.append(entry)
-            found += 1
-    if later:
-        print("Later references%s:" %
-              (" (latest %d of %d)" % (len(later), found)
-               if found > len(later) else ""))
-        for entry in later:
-            print("#%d %s %s" % entry)
+    _print_later_references(d, ident + 1, references)
 
 
 def cmd_amend(d, args):
-    if len(args) != 2:
-        die("usage: %s amend <id> \"<corrected replacement>\"" % ME)
-    _append_lifecycle(d, "Amends", args[0], args[1])
+    fit = "--fit" in args
+    rest = [arg for arg in args if arg != "--fit"]
+    if len(rest) != 2 or len(args) != len(rest) + (1 if fit else 0):
+        die("usage: %s amend [--fit] <id|lo-hi> \"<corrected replacement>\""
+            % ME)
+    _append_lifecycle(d, "Amends", rest[0], rest[1], fit=fit)
 
 
 def cmd_retract(d, args):
-    if len(args) != 2:
-        die("usage: %s retract <id> \"<reason>\"" % ME)
-    _append_lifecycle(d, "Retracts", args[0], args[1])
+    fit = "--fit" in args
+    rest = [arg for arg in args if arg != "--fit"]
+    if len(rest) != 2 or len(args) != len(rest) + (1 if fit else 0):
+        die("usage: %s retract [--fit] <id|lo-hi> \"<reason>\"" % ME)
+    _append_lifecycle(d, "Retracts", rest[0], rest[1], fit=fit)
 
 
 def _nap_apply(d, path):
@@ -2638,16 +2745,42 @@ def cmd_config(d, args):
     default. Sizes only select what is printed, so changing one is free: no
     memory is touched and nothing is recomputed."""
     over = overrides(d)
+    updates = []
     for a in args:
         k, eq, v = a.partition("=")
         k = k.strip().upper()
         if not eq or k not in KNOBS:
             die("usage: %s config [NAME=VALUE ...]   # NAME one of %s"
                 % (ME, ", ".join(KNOBS)))
-        if v.strip():
-            over[k] = size(k, v.strip())
+        updates.append((k, v.strip()))
+    # Widths settle first: they are physical, they bound ENTRY_CHARS, and
+    # changing one under existing records would misalign every later seek.
+    for k, v in updates:
+        if k not in ("LOG_REC", "TREE_REC"):
+            continue
+        proposed = size(k, v) if v else KNOBS[k][0]
+        if proposed != globals()[k] and log_len(d):
+            die("%s is this store's physical record width: it can only "
+                "change while the store is empty, and it holds %s.\n"
+                "Export, create a fresh store with the new width, and "
+                "import there instead." % (k, plural(log_len(d), "memory")))
+        if v:
+            over[k] = proposed
         else:
             over.pop(k, None)
+    widths = (over.get("LOG_REC", KNOBS["LOG_REC"][0]),
+              over.get("TREE_REC", KNOBS["TREE_REC"][0]))
+    for k, v in updates:
+        if k in ("LOG_REC", "TREE_REC"):
+            continue
+        if v:
+            over[k] = size(k, v, widths=widths)
+        else:
+            over.pop(k, None)
+    top = min(widths[1] - 8, widths[0] - 40)
+    if over.get("ENTRY_CHARS", KNOBS["ENTRY_CHARS"][0]) > top:
+        die("These widths cap ENTRY_CHARS at %d. Lower ENTRY_CHARS in the "
+            "same command." % top)
     if args:
         write_config(d, over)
     for k, (default, what) in KNOBS.items():
@@ -3730,6 +3863,22 @@ def cmd_import(d, args):
               % (plural(n, "compression"), ME))
 
 
+def _peek_log_rec(d):
+    """One store's record width, read leniently: status lines describe other
+    stores too, and a foreign store's bad config must not kill doctor."""
+    try:
+        for line in open(os.path.join(d, "config"), encoding="utf-8"):
+            body = line.split("#")[0]
+            if "=" not in body:
+                continue
+            k, v = body.split("=", 1)
+            if k.strip().upper() == "LOG_REC" and v.strip().isdigit():
+                return max(64, int(v.strip()))
+    except OSError:
+        pass
+    return KNOBS["LOG_REC"][0]
+
+
 def memory_status(d):
     """A read-only, human-friendly store summary for doctor."""
     if not os.path.isdir(d):
@@ -3739,10 +3888,11 @@ def memory_status(d):
         return "LOG.txt is a symbolic link"
     if not os.path.isfile(p):
         return "directory exists, but LOG.txt is missing"
+    rec = _peek_log_rec(d)
     size = os.path.getsize(p)
-    if size % LOG_REC:
-        return "LOG.txt is corrupt (%d trailing bytes)" % (size % LOG_REC)
-    return plural(size // LOG_REC, "memory")
+    if size % rec:
+        return "LOG.txt is corrupt (%d trailing bytes)" % (size % rec)
+    return plural(size // rec, "memory")
 
 
 def cmd_scope(d, args):
@@ -3938,6 +4088,8 @@ def cmd_doctor(d, args):
     deep = args == ["--deep"]
     if args and not deep:
         die("usage: %s doctor [--deep]" % ME)
+    if os.path.isdir(d):
+        config(d)  # the active store's widths govern counting and --deep
     project_info = project_scope()
     project = project_info["store"]
     global_ = os.path.expanduser(GLOBAL)
@@ -3977,6 +4129,10 @@ def cmd_doctor(d, args):
     print("  Project store: %s [%s]" % (pretty(project), memory_status(project)))
     print("  Global store:  %s [%s]" % (pretty(global_), memory_status(global_)))
     print("  FFF recall:    %s" % fff_status)
+    tag, tag_source = session_info()
+    print("  Session tag:   %s" %
+          ("@%s (%s)" % (tag, tag_source) if tag
+           else "none (%s); entries are written untagged" % tag_source))
     qmd = _qmd_status(d)
     print("  QMD executable:   %s" % qmd["executable"])
     print("  QMD integration: %s" %

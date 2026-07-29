@@ -206,10 +206,10 @@ commands such as `scope` and `doctor` never create the marker or a store.
 | `memo qmd config [FALLBACK=on\|off]` | inspect or opt into semantic fallback after exact and FFF misses |
 | `memo qmd disable [--purge]` | disable QMD; optionally remove its projection |
 | `memo wake` | read both memories — global, then project; first command of every session |
-| `memo note "..."` | record one memory: one line, up to 280 UTF-8 bytes (project by default) |
-| `memo show <id>` | show one canonical raw memory and later records that reference its stable ID |
-| `memo amend <id> "..."` | append a corrected replacement; preserve the original as history |
-| `memo retract <id> "<reason>"` | append that an earlier memory is no longer authoritative |
+| `memo note [--fit] "..."` | record one memory: one line, up to 280 UTF-8 bytes (project by default); `--fit` trims at a word boundary and reports the cut |
+| `memo show <id\|lo-hi>` | show one canonical raw memory — or a summary block — and later records that reference it |
+| `memo amend [--fit] <id\|lo-hi> "..."` | append a corrected replacement; a `lo-hi` block supersedes an already-compressed range |
+| `memo retract [--fit] <id\|lo-hi> "<reason>"` | append that an earlier memory or summarized range is no longer authoritative |
 | `memo nap` | answer the merges that came due |
 | `memo nap --batch N` | print up to N independent compression jobs |
 | `memo nap --apply <file>` | preflight and atomically apply TAB-separated batch summaries |
@@ -220,7 +220,7 @@ commands such as `scope` and `doctor` never create the marker or a store.
 | `memo zoom [--depth N] <lo>-<hi>` | open one to six levels of a summary-tree node |
 | `memo resummarize <lo>-<hi>` | drop a bad summary; the next nap rebuilds it (`forget` remains an alias) |
 | `memo redact <id> --force` | permanently erase one sensitive payload, preserve its ID, and invalidate derived caches |
-| `memo config [NAME=N]` | inspect or change the active store's reading/output limits |
+| `memo config [NAME=N]` | inspect or change the active store's sizes: reading budgets, merge granularity, and — while empty — record widths |
 | `memo export [--with-ids] [file]` | write a portable history; IDs are omitted by default so the output can be imported |
 | `memo import [--dry-run] <file>` | validate or restore `YYYY-MM-DD <text>` records into an empty store |
 | `memo --help` | show the complete command overview |
@@ -249,6 +249,31 @@ The original remains visible as history, but compression treats later
 amendments, corrections, and retractions as authoritative. Agents may also
 reference earlier `#IDs` in ordinary notes when a stable fact, decision, or
 causal link benefits from an exact anchor.
+
+Supersession outlives compression: once the authoritative statement lives in
+a summary line `#a-b`, `memo amend a-b "..."` targets the whole block with
+`Amends #a-#b: ...`, and `memo show` on the block or on any raw memory inside
+it lists that supersession as a later reference. (`amend`/`retract` write
+only aligned blocks; `import` also tolerates plain `#a-#b` ranges from
+foreign histories.)
+
+### Provenance
+
+Every entry written by `note`, `amend`, and `retract` is stamped with an
+opaque session tag inside its payload:
+
+```text
+#83 2026-07-29 @9845 The staging cluster pins Postgres 16.
+```
+
+Set `OPTMEM_SESSION` to choose the tag; otherwise one is derived from the
+harness process that owns the session (or the controlling terminal), so
+parallel agent sessions on one machine are distinguishable in `wake`,
+`recall`, and the compression prompts. `memo doctor` reports the active tag
+and where it came from. Three honest limits: tags are cooperative claims,
+not authenticated identities — any process may set `OPTMEM_SESSION` to any
+value; when no stable identity exists, entries are simply written untagged;
+and a pre-2.0 entry whose text happened to begin `@word ` reads as if tagged.
 
 `redact` is intentionally different and requires `--force`: it replaces the
 payload with `[REDACTED BY USER]`, preserves the ID and date, invalidates
@@ -423,12 +448,26 @@ memo config WAKE_LINES=300   # how many lines wake prints (208 ≈ 16k tokens)
 memo config WAKE_LINES=      # back to the default
 ```
 
-`WAKE_LINES` is the only size worth touching, and it is a reading budget, not
-a storage budget: change it whenever, in either direction, and nothing is
-recomputed.
+`WAKE_LINES` is usually the only size worth touching, and it is a reading
+budget, not a storage budget: change it whenever, in either direction, and
+nothing is recomputed. The same is true of `RAW_MAX`, the merge granularity —
+how many raw memories one compression prompt shows before a block merges from
+its two half summaries instead (default 16).
 
 Records are fixed width, so position *is* identity and every lookup is one
 seek. At a million memories (608 MB), `wake` takes 0.03s.
+
+The widths themselves are per-store sizes too, which is how a store can hold
+entries longer than 280 bytes — but they are *physical*, so they may only be
+set while the store is empty:
+
+```sh
+memo config LOG_REC=640 TREE_REC=576 ENTRY_CHARS=560   # on a fresh store
+```
+
+To widen an existing memory, `memo export` it, create a fresh store with the
+new widths, and `memo import` there. `ENTRY_CHARS` is always capped at
+`min(TREE_REC - 8, LOG_REC - 40)` so every entry and summary fits its record.
 
 Set `$MEMORY_DIR` to pin a single store and skip scoping — a synced folder, a
 git repo. See [WINDOWS.md](WINDOWS.md) for native PowerShell usage and locking
@@ -548,9 +587,9 @@ want to be worked with, this machine, your own tooling. How one project does
 something is not global, however much it feels like a lesson -- write it to
 that project. A `MEMORY_DIR` override intentionally pins commands to one store.
 
-If a line is over the byte limit, `memo note --fit` trims it at a word
-boundary and reports exactly what was cut; rewrite only if the cut loses
-something essential.
+If a line is over the byte limit, `--fit` on `note`, `amend`, or `retract`
+trims it at a word boundary and reports exactly what was cut; rewrite only
+if the cut loses something essential.
 
 Do not register redundant memories. Never record secrets, credentials,
 authentication material, or raw sensitive data.
@@ -568,7 +607,8 @@ amend the whole block: `memo amend <a>-<b> "<replacement>"` supersedes the
 summarized range and stays linked to every raw memory inside it. Ordinary
 memories may reference earlier `#IDs` to anchor stable facts and reasoning.
 Use `memo show <id>` when you need the exact record and its later
-references, including block supersessions that cover it.
+references, including block supersessions that cover it;
+`memo show <a>-<b>` shows a summary block and what supersedes it.
 Redaction is not correction: only the user may request it, and it exists for
 content that must actually be erased.
 
