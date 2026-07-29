@@ -60,6 +60,10 @@ Hooks (optional commands named by environment variables):
                     refuses the write.
   OPTMEM_HOOK_POST  observes the record just written on stdin; a failure
                     warns and never unwrites. Neither runs for import or nap.
+  OPTMEM_HOOK_SHOW  post-processes displayed memory lines (wake, show,
+                    recall, zoom): stdin gets one line per memory shown and
+                    stdout must return exactly as many; protocol text is
+                    never touched, and any failure shows the raw lines.
 
 Examples:
   {memo} setup                   teach existing AGENTS.md/CLAUDE.md to use memo
@@ -123,7 +127,7 @@ ME = TOOL
 
 # The memory that follows you everywhere, as opposed to the one per project.
 GLOBAL = "~/.optmem/memory"
-VERSION = "2.0.3"
+VERSION = "2.0.4"
 INSTALL_BASE = "https://github.com/doeixd/OptMem/releases/latest/download"
 SCOPE_GLOBAL = False  # set by main() from `--global`
 
@@ -1423,6 +1427,31 @@ def post_hook(record):
               % result.returncode)
 
 
+def show_hook(lines):
+    """OPTMEM_HOOK_SHOW post-processes DISPLAYED memory lines, one spawn per
+    command: stdin gets one line per memory or summary shown, stdout must
+    return exactly as many lines, in order. It never touches protocol text
+    (part footers, `You are awake.`, nap prompts), never the store, and
+    never what recall SEARCHES -- only what is printed. Any failure or a
+    line-count mismatch falls back to the raw lines: display must not be
+    able to lose records."""
+    if not lines:
+        return lines
+    result = _run_hook("OPTMEM_HOOK_SHOW", "\n".join(lines) + "\n")
+    if result is None:
+        return lines
+    if result.returncode:
+        print("Warning: OPTMEM_HOOK_SHOW exited %d; showing raw lines."
+              % result.returncode, file=sys.stderr)
+        return lines
+    out = result.stdout.splitlines()
+    if len(out) != len(lines):
+        print("Warning: OPTMEM_HOOK_SHOW returned %d lines for %d; showing "
+              "raw lines." % (len(out), len(lines)), file=sys.stderr)
+        return lines
+    return out
+
+
 # A stamp is a date, optionally with a time: ISO order IS lexicographic
 # order, so a bare day and a timestamped moment on that day compare
 # correctly as strings, and the log's chronology check stays one `<`.
@@ -2604,7 +2633,7 @@ def cmd_wake(d, args, tail=True, continuation=None):
                 die("The summary of #%d-%d is blank. Run: %s resummarize %d-%d"
                     % (lo, hi - 1, ME, lo, hi - 1))
             lines.append("#%d-%d %s" % (lo, hi - 1, s))
-    parts = paginate(lines)
+    parts = paginate(show_hook(lines))
     if not 1 <= k <= len(parts):
         die("No part %d: the memory has %s. Run: %s wake"
             % (k, plural(len(parts), "part"), ME))
@@ -2721,8 +2750,7 @@ def _print_later_references(d, first, references):
         print("Later references%s:" %
               (" (latest %d of %d)" % (len(later), found)
                if found > len(later) else ""))
-        for entry in later:
-            print("#%d %s %s" % entry)
+        print("\n".join(show_hook(["#%d %s %s" % entry for entry in later])))
 
 
 def cmd_show(d, args):
@@ -2737,13 +2765,13 @@ def cmd_show(d, args):
         if lo >= T:
             die("#%d-%d is beyond the memory: it holds %s. Run: %s wake"
                 % (lo, hi - 1, plural(T, "memory"), ME))
-        print("#%d-%d %s" % (lo, hi - 1,
-                             tree_get(d, lo, hi) or "not compressed yet"))
+        print("\n".join(show_hook(["#%d-%d %s" % (
+            lo, hi - 1, tree_get(d, lo, hi) or "not compressed yet")])))
         pattern = re.compile(r"(?<!\d)#%d-#%d(?!\d)" % (lo, hi - 1))
         _print_later_references(d, hi, pattern.search)
         return
     ident = require_memory(d, args[0])
-    print("#%d %s %s" % log_get(d, ident))
+    print("\n".join(show_hook(["#%d %s %s" % log_get(d, ident)])))
     pattern = re.compile(r"(?<!\d)#%d(?!\d)" % ident)
     spans = re.compile(r"#(\d+)-#(\d+)")
 
@@ -3624,7 +3652,7 @@ def _print_fuzzy(d, out, limit, context):
     selected = list(out[:limit] if limit is not None else out)
     selected, rendered, output_trimmed = _fit_context(
         d, selected, context, ranked=True)
-    print("\n".join(rendered))
+    print("\n".join(show_hook(rendered)))
     detail = "FFF, strongest first"
     if context:
         detail += "; context deduplicated, matches marked >"
@@ -3779,7 +3807,7 @@ def cmd_recall(d, args):
         return
     selected, rendered, context_trimmed = _fit_context(
         d, out, context, ranked=False)
-    print("\n".join(rendered))
+    print("\n".join(show_hook(rendered)))
     if len(selected) < hits:
         reasons = []
         if limit_trimmed:
@@ -3844,7 +3872,7 @@ def cmd_zoom(d, args):
     if _output_size(lines) > PART_CHARS or len(lines) > PART_LINES:
         die("Depth %d exceeds the output limit for #%s. Retry with "
             "--depth %d." % (depth, block[0], depth - 1))
-    print("\n".join(lines))
+    print("\n".join(show_hook(lines)))
 
 
 def cmd_export(d, args):
@@ -4262,7 +4290,7 @@ def cmd_doctor(d, args):
     print("  Session tag:   %s" %
           ("@%s (%s)" % (tag, tag_source) if tag
            else "none (%s); entries are written untagged" % tag_source))
-    for hook in ("OPTMEM_HOOK_PRE", "OPTMEM_HOOK_POST"):
+    for hook in ("OPTMEM_HOOK_PRE", "OPTMEM_HOOK_POST", "OPTMEM_HOOK_SHOW"):
         command = os.environ.get(hook, "").strip()
         if command:
             print("  %-14s %s" % (hook.split("_")[-1].capitalize() + " hook:",

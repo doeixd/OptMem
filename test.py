@@ -1119,6 +1119,47 @@ finally:
     os.environ.pop("OPTMEM_HOOK_PRE", None)
     os.environ.pop("OPTMEM_HOOK_POST", None)
 
+# OPTMEM_HOOK_SHOW filters displayed memory lines only: protocol text is
+# untouched, and any failure falls back to the raw lines.
+with open(os.path.join(hookdir, "show_mark.py"), "w") as f:
+    f.write("import sys\n"
+            "for line in sys.stdin.read().splitlines():\n"
+            "    sys.stdout.write('<<' + line + '>>\\n')\n")
+with open(os.path.join(hookdir, "show_drop.py"), "w") as f:
+    f.write("import sys\nsys.stdin.read()\nsys.stdout.write('one line\\n')\n")
+os.environ["OPTMEM_HOOK_SHOW"] = '%s "%s"' % (
+    hook_runner, os.path.join(hookdir, "show_mark.py"))
+try:
+    woke_hooked = run("wake", store=hooked)
+    check(woke_hooked.returncode == 0
+          and "<<#0 " in woke_hooked.stdout
+          and "HOOKED ENTRY>>" in woke_hooked.stdout
+          and woke_hooked.stdout.rstrip().endswith("You are awake."),
+          "the show hook did not filter wake lines, or touched protocol "
+          "text:\n" + woke_hooked.stdout)
+    shown_hooked = run("show", "0", store=hooked)
+    check(shown_hooked.stdout.startswith("<<#0 "),
+          "the show hook did not filter show output:\n" + shown_hooked.stdout)
+    recalled_hooked = run("recall", "HOOKED", store=hooked)
+    check("<<#0 " in recalled_hooked.stdout
+          and "1 match." in recalled_hooked.stdout,
+          "the show hook did not filter recall output, or altered its "
+          "protocol summary:\n" + recalled_hooked.stdout)
+    # a hook that changes the line count must not be able to lose records
+    run("note", "second entry", store=hooked)
+    os.environ["OPTMEM_HOOK_SHOW"] = '%s "%s"' % (
+        hook_runner, os.path.join(hookdir, "show_drop.py"))
+    dropped_hooked = run("zoom", "0-1", store=hooked)
+    check(dropped_hooked.returncode == 0
+          and "#0 " in dropped_hooked.stdout
+          and "#1 " in dropped_hooked.stdout
+          and "<<" not in dropped_hooked.stdout
+          and "showing raw lines" in dropped_hooked.stderr,
+          "a line-dropping show hook was allowed to lose records:\n"
+          + dropped_hooked.stdout + dropped_hooked.stderr)
+finally:
+    os.environ.pop("OPTMEM_HOOK_SHOW", None)
+
 portable = os.path.join(life, "portable.txt")
 inspection = os.path.join(life, "inspection.txt")
 check(run("export", portable, store=life).returncode == 0

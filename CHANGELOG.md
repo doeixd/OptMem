@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.0.4 — 2026-07-29
+
+- Added `OPTMEM_HOOK_SHOW`, reversing 2.0.3's stance on user request, with
+  the scoping that made it safe: it post-processes displayed memory lines in
+  `wake`, `show`, `recall` (exact/fuzzy), and `zoom` — one spawn per
+  command, stdin one line per memory shown, stdout exactly as many lines
+  back. Protocol text is never touched, searches are unaffected, and any
+  failure or line-count mismatch falls back to the raw lines, so display
+  cannot lose records or corrupt the wake contract. `doctor` lists it.
+- README: the fork-vs-original comparison now leads with the headline
+  features — the amend/retract lifecycle, layered recall, and automatic
+  project-vs-global scoping.
+
 ## 2.0.3 — 2026-07-29
 
 - `--date` accepts a timestamp: `YYYY-MM-DDTHH:MM[:SS]`, no timezone offset
