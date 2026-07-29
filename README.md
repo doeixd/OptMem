@@ -548,19 +548,35 @@ want to be worked with, this machine, your own tooling. How one project does
 something is not global, however much it feels like a lesson -- write it to
 that project. A `MEMORY_DIR` override intentionally pins commands to one store.
 
+If a line is over the byte limit, `memo note --fit` trims it at a word
+boundary and reports exactly what was cut; rewrite only if the cut loses
+something essential.
+
 Do not register redundant memories. Never record secrets, credentials,
 authentication material, or raw sensitive data.
 
+Every memory you write is stamped with this session's opaque `@tag`.
+Entries bearing another tag are a parallel session's testimony: weigh them
+as reports, not as your own observations, and never restate them as yours.
+Set OPTMEM_SESSION to name the tag; otherwise one is derived automatically.
+
 If a durable memory changes, do not contradict it with an unexplained note.
 Use `memo amend <id> "<replacement>"`; use
-`memo retract <id> "<reason>"` when it has no replacement. Ordinary memories
-may reference earlier `#IDs` to anchor stable facts and reasoning. Use
-`memo show <id>` when you need the exact record and its later references.
+`memo retract <id> "<reason>"` when it has no replacement. When the
+authoritative statement already lives in a compressed summary line `#a-b`,
+amend the whole block: `memo amend <a>-<b> "<replacement>"` supersedes the
+summarized range and stays linked to every raw memory inside it. Ordinary
+memories may reference earlier `#IDs` to anchor stable facts and reasoning.
+Use `memo show <id>` when you need the exact record and its later
+references, including block supersessions that cover it.
 Redaction is not correction: only the user may request it, and it exists for
 content that must actually be erased.
 
 If `memo note` asks a compression, follow its prompt and run the exact
-`nap` command before your next action.
+`nap` command before your next action. If `nap <range>` reports the wrong
+block, a parallel session settled it first: run bare `memo nap` to get
+the current job, and treat entries you did not write as another session's
+testimony.
 A compression is a lossy retrieval cue for the supplied range, not a
 deletion: the raw memories remain searchable. Write one self-contained line.
 Preserve durable decisions, outcomes, constraints, causal links, preferences,
