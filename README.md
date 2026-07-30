@@ -76,8 +76,6 @@ CLI, then verify the automatic project scope:
 ```sh
 cd /path/to/project
 memo setup
-memo scope
-memo doctor
 ```
 
 On Windows:
@@ -85,8 +83,6 @@ On Windows:
 ```powershell
 Set-Location C:\path\to\project
 memo setup
-memo scope
-memo doctor
 ```
 
 `memo setup` adds a managed OptMem instruction block to `AGENTS.md` and
