@@ -32,6 +32,13 @@ Existing files keep all of their content, with the OptMem block added at the
 top. Re-running the command changes nothing when the block is current and
 updates only the managed block when OptMem's instructions change.
 
+If `AGENTS.md` and `CLAUDE.md` are two names for one file — a symlink either
+way, or a hard link, which is how Windows checkouts usually pair them — that
+file receives one block, not two. `setup` follows the link, edits the file
+behind it, leaves the link a link, and says which name it was reached through.
+A symlink pointing at nothing is reported rather than replaced with a regular
+file.
+
 Pass one or more paths to target different files:
 
 ```sh
