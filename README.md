@@ -694,8 +694,19 @@ If a line is over the byte limit, `--fit` on `note`, `amend`, or `retract`
 trims it at a word boundary and reports exactly what was cut; rewrite only
 if the cut loses something essential.
 
-Do not register redundant memories. Never record secrets, credentials,
-authentication material, or raw sensitive data.
+Prefer why over what: commits and diffs already record what changed. A memory
+earns its place by holding what they cannot -- reasoning, constraints, the
+rejected alternative, the reason an approach failed.
+
+So do not write what the code or git history answers, the status of work in
+progress, what stops mattering when this task ends, or a memory already held
+(`recall` first when unsure). Write at an outcome, not mid-attempt.
+
+A memory must stand alone months from now: name things specifically, resolve
+relative time and reference, one fact per memory.
+
+Never record secrets, credentials, authentication material, or raw
+sensitive data.
 
 Every memory you write is stamped with this session's opaque `@tag`.
 Entries bearing another tag are a parallel session's testimony: weigh them
