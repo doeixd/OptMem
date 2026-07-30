@@ -1,5 +1,47 @@
 # Changelog
 
+## Unreleased
+
+### `RAW_MIN`: how often a compression is asked
+
+- Added `RAW_MIN` (default 2, a power of two up to `RAW_MAX`), the floor of
+  the merge tree: the smallest block it builds. Levels start there instead of
+  at 2, so `N` memories owe about `2N/RAW_MIN` merges instead of `N` — at
+  `RAW_MIN=8`, 15 compressions per 64 memories instead of 63. The merges it
+  skips are the narrowest ones, so every remaining summary is also written
+  from more raw text: fewer prompts and less loss from the same knob. The
+  default reproduces previous behavior exactly.
+- Below the floor nothing is summarized: `wake` covers that span with raw
+  memories, one `zoom` opens a whole block of them at once, and `nap` prompts
+  for a `RAW_MIN`-wide block read from raw entries. A store therefore carries
+  up to `RAW_MIN - 1` uncompressed memories at the present edge.
+- `config RAW_MIN=` is safe on a lived-in store, unlike the physical record
+  widths. Raising it prunes the now-unreachable finer levels and says so
+  (`Pruned TREE/2`); lowering it makes them pending again. `LOG.txt` and the
+  coarser summaries are untouched either way, so nothing is lost. `doctor`
+  reports a level left below `RAW_MIN` as stale rather than broken.
+
+### `setup` when AGENTS.md and CLAUDE.md are one file
+
+- `setup` now follows a link instead of refusing it. Previously, `AGENTS.md`
+  symlinked to `CLAUDE.md` (or the reverse) failed the whole command with
+  "Refusing to replace symlink", even though the file behind it was an
+  ordinary writable file. It now edits that file and leaves the link a link.
+- Two names for one file get one block, not two. Deduplication was by
+  `realpath`, which sees a symlink but *not* a hard link — the pairing Windows
+  checkouts use, since symlinks there need a privilege. Targets are now
+  deduplicated by file identity (device + inode), so either kind of link
+  collapses to a single write, in either argument order.
+- A file with more than one name is rewritten through its inode rather than
+  replaced, because `os.replace` would leave the new content under one name
+  and the old content under the other. Singly-named files keep the atomic
+  replace.
+- Output names the file that was edited and the link it was reached through
+  (`... in CLAUDE.md (through AGENTS.md)`), and reports the second name as
+  `is the same file as ...: written once`, so a skipped target is never
+  silently absent. A dangling symlink is reported instead of being turned
+  into a regular file, and a non-regular target is refused.
+
 ## 2.0.4 — 2026-07-29
 
 - Added `OPTMEM_HOOK_SHOW`, reversing 2.0.3's stance on user request, with

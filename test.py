@@ -412,6 +412,98 @@ check(bad_setup.returncode == 1 and "Malformed OptMem markers" in bad_setup.stde
       and not os.path.exists(untouched),
       "setup wrote a partial result before rejecting malformed markers:\n"
       + bad_setup.stdout + bad_setup.stderr)
+# AGENTS.md and CLAUDE.md are commonly ONE file under two names: a symlink
+# either way, or a hard link where symlinks need a privilege. The block must
+# land in it once, both names must still name it afterwards, and the link must
+# survive -- setup must never replace a link with a regular file.
+def linked_setup(kind):
+    """Set up a fresh AGENTS.md/CLAUDE.md pair joined by one link, or None if
+    this platform will not make that kind of link (Windows without the
+    privilege). Returns (dir, target, link)."""
+    where = tempfile.mkdtemp(prefix="optmem-linked-")
+    target = os.path.join(where, "AGENTS.md")
+    link = os.path.join(where, "CLAUDE.md")
+    with open(target, "w", encoding="utf-8") as f:
+        f.write("# House rules\n\nBe careful.\n")
+    try:
+        if kind == "symlink":
+            os.symlink(target, link)
+        else:
+            os.link(target, link)
+    except (OSError, NotImplementedError, AttributeError):
+        shutil.rmtree(where, ignore_errors=True)
+        return None
+    return where, target, link
+
+
+for kind in ("symlink", "hardlink"):
+    made = linked_setup(kind)
+    if made is None:
+        continue           # the platform refused; the other kind still covers
+    where, target, link = made
+    for order in (["AGENTS.md", "CLAUDE.md"], ["CLAUDE.md", "AGENTS.md"], []):
+        made_each = linked_setup(kind)
+        if made_each is None:
+            continue
+        where_each, target_each, link_each = made_each
+        r = subprocess.run(memo + ["setup"] + order, cwd=where_each,
+                           capture_output=True, text=True, env=fresh)
+        body = open(target_each, encoding="utf-8").read()
+        check(r.returncode == 0,
+              "%s setup %s failed:\n%s" % (kind, order, r.stdout + r.stderr))
+        check(body.count(cli.AGENT_START) == 1
+              and body.count(cli.AGENT_END) == 1,
+              "%s setup %s wrote the block %d times into one file"
+              % (kind, order, body.count(cli.AGENT_START)))
+        check("Be careful." in body,
+              "%s setup %s dropped the file's own instructions" % (kind, order))
+        # both names must still be one file, with one content
+        check(os.path.exists(link_each) and os.path.exists(target_each)
+              and os.path.samefile(link_each, target_each),
+              "%s setup %s broke the link between the two names"
+              % (kind, order))
+        check(open(link_each, encoding="utf-8").read() == body,
+              "%s setup %s left the two names with different contents"
+              % (kind, order))
+        if kind == "symlink":
+            check(os.path.islink(link_each) and not os.path.islink(target_each),
+                  "%s setup %s replaced the symlink with a regular file"
+                  % (kind, order))
+        check(r.stdout.count("Added OptMem instructions") == 1,
+              "%s setup %s did not report exactly one file written:\n%s"
+              % (kind, order, r.stdout))
+        check("same file" in r.stdout,
+              "%s setup %s did not say the second name is the same file:\n%s"
+              % (kind, order, r.stdout))
+        # and it stays idempotent through the link
+        again = subprocess.run(memo + ["setup"] + order, cwd=where_each,
+                               capture_output=True, text=True, env=fresh)
+        check(again.returncode == 0
+              and again.stdout.count("Already configured:") == 1
+              and open(target_each, encoding="utf-8").read() == body,
+              "%s setup %s is not idempotent through the link:\n%s"
+              % (kind, order, again.stdout + again.stderr))
+        shutil.rmtree(where_each, ignore_errors=True)
+    shutil.rmtree(where, ignore_errors=True)
+
+# A symlink pointing nowhere must be reported, not silently turned into a
+# regular file that the link's owner never asked for.
+dangling_dir = tempfile.mkdtemp(prefix="optmem-dangling-")
+dangling = os.path.join(dangling_dir, "AGENTS.md")
+try:
+    os.symlink(os.path.join(dangling_dir, "nowhere.md"), dangling)
+except (OSError, NotImplementedError):
+    dangling = None
+if dangling:
+    r = subprocess.run(memo + ["setup", "--create", "AGENTS.md"],
+                       cwd=dangling_dir, capture_output=True, text=True,
+                       env=fresh)
+    check(r.returncode == 1 and "does not exist" in r.stderr
+          and os.path.islink(dangling),
+          "setup followed a dangling symlink instead of reporting it:\n"
+          + r.stdout + r.stderr)
+shutil.rmtree(dangling_dir, ignore_errors=True)
+
 conflicting_setup = subprocess.run(
     memo + ["setup", "--create", "--no-create"], cwd=setup_dir,
     capture_output=True, text=True, env=fresh)
@@ -2036,6 +2128,271 @@ check("#0-1 first narrow half" in prompt
       and "#2-3 second narrow half" in prompt
       and "#0 " not in prompt,
       "RAW_MAX=2 still merged a 4-block from raw entries:\n" + prompt)
+
+# RAW_MIN is the floor of the merge tree: the smallest block it builds. It is
+# the knob for how OFTEN a compression is asked -- levels start there instead
+# of at 2, so N memories owe ~2N/RAW_MIN merges instead of ~N -- and the first
+# summary of any range is written from RAW_MIN raw entries, never from a pair.
+def complete_floor(T, floor):
+    """complete(), but for a tree whose finest level is `floor`."""
+    out, size = [], floor
+    while size <= T:
+        out += [(i * size, (i + 1) * size) for i in range(T // size)]
+        size *= 2
+    return out
+
+
+for floor in (2, 8, 64):
+    cli.RAW_MIN = floor
+    for T in list(range(1, 200)) + [1000, 4096, 10000, 65536]:
+        c = cover(T, WAKE_LINES)
+        check(len(c) <= WAKE_LINES,
+              "RAW_MIN=%d T=%d: %d lines > budget" % (floor, T, len(c)))
+        check(c and c[0][0] == 0 and c[-1][1] == T,
+              "RAW_MIN=%d T=%d: does not span [0,T)" % (floor, T))
+        for a, b in zip(c, c[1:]):
+            check(a[1] == b[0], "RAW_MIN=%d T=%d: gap or overlap at %s %s"
+                  % (floor, T, a, b))
+            check(b[1] - b[0] <= a[1] - a[0],
+                  "RAW_MIN=%d T=%d: detail does not increase toward the "
+                  "present" % (floor, T))
+        for lo, hi in c:
+            s = hi - lo
+            check(s & (s - 1) == 0 and lo % s == 0,
+                  "RAW_MIN=%d T=%d: [%d,%d) is not an aligned block"
+                  % (floor, T, lo, hi))
+            # the whole point: a cover may ask for a raw memory or for a real
+            # summary, never for a summary the tree does not build
+            check(s == 1 or s >= floor,
+                  "RAW_MIN=%d T=%d: cover wants unbuildable block [%d,%d)"
+                  % (floor, T, lo, hi))
+        seen_blocks = set(b for b in c if b[1] - b[0] > 1)
+        check(seen_blocks <= set(complete_floor(T, floor)),
+              "RAW_MIN=%d T=%d: cover wants a block the tree never yields"
+              % (floor, T))
+cli.RAW_MIN = DEFAULTS["RAW_MIN"]
+
+# The tool's pending() reads level lengths instead of scanning, so it is
+# checked against the definition at every floor.
+for floor in (2, 8, 32):
+    p = tempfile.mkdtemp(prefix="optmem-floor-")
+    os.makedirs(os.path.join(p, "TREE"))
+    open(os.path.join(p, "LOG.txt"), "wb").close()
+    run("config", "RAW_MIN=%d" % floor, "RAW_MAX=%d" % max(16, floor),
+        store=p)
+    merges = 0
+    for i in range(64):
+        out = run("note", "floor entry %d" % i, store=p).stdout
+        while nap_id(out):
+            block = nap_id(out)
+            out = run("nap", block, "summary of %s" % block, store=p).stdout
+            merges += 1
+        cli.RAW_MIN = floor          # pending() below is called in-process
+        check(cli.pending(p, i + 1) == [],
+              "RAW_MIN=%d: work was left pending after #%d" % (floor, i))
+        cli.RAW_MIN = DEFAULTS["RAW_MIN"]
+    check(merges == len(complete_floor(64, floor)),
+          "RAW_MIN=%d: %d merges for 64 memories, expected %d"
+          % (floor, merges, len(complete_floor(64, floor))))
+    check(run("wake", store=p).stdout.rstrip().endswith("You are awake."),
+          "RAW_MIN=%d: wake broke" % floor)
+    shutil.rmtree(p)
+
+# 64 memories: 63 merges at the default floor, 15 at 8, 3 at 32. Raising the
+# floor is the only way to be asked less often.
+check(len(complete_floor(64, 2)) == 63 and len(complete_floor(64, 8)) == 15
+      and len(complete_floor(64, 32)) == 3,
+      "the merge count no longer falls as RAW_MIN rises")
+
+floored = tempfile.mkdtemp(prefix="optmem-raw-min-")
+os.makedirs(os.path.join(floored, "TREE"))
+open(os.path.join(floored, "LOG.txt"), "wb").close()
+run("config", "RAW_MIN=8", store=floored)
+quiet = []
+for i in range(8):
+    out = run("note", "floored entry %d" % i, store=floored).stdout
+    quiet.append(nap_id(out))
+check(quiet[:7] == [None] * 7,
+      "RAW_MIN=8 asked a compression before 8 memories existed: %s" % quiet)
+check(quiet[7] == "0-7", "RAW_MIN=8 did not ask for 0-7 first: %s" % quiet)
+prompt = run("wake", store=floored).stdout
+check("nap 0-7" in prompt and all("floored entry %d" % i in prompt
+                                  for i in range(8)),
+      "the first merge at RAW_MIN=8 was not written from raw entries:\n"
+      + prompt)
+# below the floor there is no block to name, and the error has to say so with
+# an id that exists
+r = run("nap", "0-1", "too fine", store=floored)
+check(r.returncode == 1 and "8-15" in r.stderr,
+      "RAW_MIN=8 accepted or misdescribed a 2-wide block: " + r.stderr)
+run("nap", "0-7", "the first eight", store=floored)
+for i in range(8, 16):
+    out = run("note", "floored entry %d" % i, store=floored).stdout
+check(nap_id(out) == "8-15", "the second 8-block was not asked: " + out)
+run("nap", "8-15", "the second eight", store=floored)
+r = run("zoom", "0-15", store=floored)
+check("#0-7 the first eight" in r.stdout and "#8-15 the second eight" in r.stdout,
+      "zoom did not open a 16-block into its two halves:\n" + r.stdout)
+r = run("zoom", "0-15", "--depth", "2", store=floored)
+check("#0 " in r.stdout and "#15 " in r.stdout and "0-7" not in r.stdout,
+      "one zoom past the floor did not open every raw memory:\n" + r.stdout)
+r = run("doctor", store=floored)
+check(r.returncode == 0, "a RAW_MIN=8 store failed doctor:\n" + r.stdout)
+
+# Raising the floor prunes the levels below it. They are a cache: the log is
+# untouched, the coarser summaries built from them stay valid, and a read
+# never reaches them again.
+run("config", "RAW_MIN=2", store=floored)
+for i in range(16, 18):
+    out = run("note", "floored entry %d" % i, store=floored).stdout
+    while nap_id(out):
+        block = nap_id(out)
+        out = run("nap", block, "fine %s" % block, store=floored).stdout
+check(os.path.exists(os.path.join(floored, "TREE", "2")),
+      "lowering RAW_MIN did not build the finer level")
+before_log = open(os.path.join(floored, "LOG.txt"), "rb").read()
+coarse = open(os.path.join(floored, "TREE", "16"), "rb").read()
+r = run("config", "RAW_MIN=8", store=floored)
+check(r.returncode == 0 and "Pruned TREE/2" in r.stdout
+      and "Pruned TREE/4" in r.stdout,
+      "raising RAW_MIN did not prune the orphaned levels:\n" + r.stdout)
+check(not os.path.exists(os.path.join(floored, "TREE", "2"))
+      and not os.path.exists(os.path.join(floored, "TREE", "4"))
+      and open(os.path.join(floored, "TREE", "16"), "rb").read() == coarse
+      and open(os.path.join(floored, "LOG.txt"), "rb").read() == before_log,
+      "pruning touched the log or a level it must keep")
+check(run("wake", store=floored).stdout.rstrip().endswith("You are awake."),
+      "wake broke after the levels below RAW_MIN were pruned")
+r = run("doctor", store=floored)
+check(r.returncode == 0, "doctor failed after pruning:\n" + r.stdout)
+
+# Every command that names a block has to agree on where the floor is: below
+# RAW_MIN there is no block to name, at it there is exactly one, and nothing
+# may offer an id it would then refuse.
+edge = tempfile.mkdtemp(prefix="optmem-edge-")
+os.makedirs(os.path.join(edge, "TREE"))
+open(os.path.join(edge, "LOG.txt"), "wb").close()
+run("config", "RAW_MIN=8", "RAW_MAX=8", store=edge)
+for i in range(32):
+    run("note", "edge entry %d" % i, store=edge)
+
+# --batch draws its run from the floor level, and applying it is atomic
+batch = run("nap", "--batch", "4", store=edge)
+check(batch.returncode == 0
+      and all(("%d-%d:" % pair) in batch.stdout
+              for pair in ((0, 7), (8, 15), (16, 23), (24, 31)))
+      and "0-1:" not in batch.stdout,
+      "nap --batch at RAW_MIN=8 did not draw floor-level jobs:\n"
+      + batch.stdout)
+check(all("edge entry %d" % i in batch.stdout for i in range(32)),
+      "a floor-level batch was not written from raw entries:\n" + batch.stdout)
+edge_batch = os.path.join(edge, "batch.tsv")
+with open(edge_batch, "w", encoding="utf-8") as f:
+    for lo in (0, 8, 16, 24):
+        f.write("%d-%d\tedge summary %d\n" % (lo, lo + 7, lo))
+r = run("nap", "--apply", edge_batch, store=edge)
+check(r.returncode == 0
+      and cli.count(cli.tree_path(edge, 8), cli.TREE_REC) == 4
+      and not os.path.exists(cli.tree_path(edge, 2))
+      and not os.path.exists(cli.tree_path(edge, 4)),
+      "applying a floor batch built levels below RAW_MIN:\n" + r.stdout + r.stderr)
+# a batch below the floor is not a batch this tree has
+stale_edge = os.path.join(edge, "too-fine.tsv")
+with open(stale_edge, "w", encoding="utf-8") as f:
+    f.write("0-1\ttoo fine to be a block\n")
+check(run("nap", "--apply", stale_edge, store=edge).returncode == 1,
+      "nap --apply accepted a block below RAW_MIN")
+
+# nap: a floor block reads raw, the level above it reads the two summaries
+prompt = run("nap", "0-15", "the first sixteen", store=edge).stdout
+r = run("show", "0-15", store=edge)
+check("the first sixteen" in r.stdout,
+      "a block above the floor did not save:\n" + r.stdout + r.stderr)
+for bad in ("0-1", "0-3", "1-8", "8-8"):
+    check(run("nap", bad, "no such block", store=edge).returncode == 1,
+          "nap accepted %s below or off the RAW_MIN=8 floor" % bad)
+
+# every id any command offers must be one every command accepts
+for out in (run("wake", store=edge).stdout,
+            run("nap", "--batch", "2", store=edge).stdout):
+    for lo, hi in re.findall(r"#(\d+)-(\d+)", out):
+        n = int(hi) - int(lo) + 1
+        check(n >= 8 and not n & (n - 1) and int(lo) % n == 0,
+              "an id below the RAW_MIN=8 floor was offered: #%s-%s" % (lo, hi))
+
+# zoom never bottoms out in "not compressed yet": past the floor it opens raw
+r = run("zoom", "0-31", "--depth", "3", store=edge)
+check("not compressed yet" not in r.stdout
+      and all("edge entry %d" % i in r.stdout for i in range(32)),
+      "zoom past the RAW_MIN floor did not reach raw memories:\n" + r.stdout)
+r = run("zoom", "0-7", store=edge)
+check(all("edge entry %d" % i in r.stdout for i in range(8))
+      and "edge summary 0" not in r.stdout,
+      "zoom of a floor block did not open its raw memories:\n" + r.stdout)
+check(run("zoom", "0-1", store=edge).returncode == 1,
+      "zoom accepted a range below the RAW_MIN floor")
+
+# amend and retract of a block: the floor is a block, below it is not, and the
+# refusal has to point at zoom rather than leave the agent guessing
+r = run("amend", "0-7", "the first eight, corrected", store=edge)
+check(r.returncode == 0 and "#0-#7" in r.stdout,
+      "amending a floor block failed:\n" + r.stdout + r.stderr)
+check("the first eight, corrected" in run("show", "0-7", store=edge).stdout,
+      "an amended floor block does not show its replacement")
+r = run("retract", "8-15", "superseded by the rewrite", store=edge)
+check(r.returncode == 0, "retracting a floor block failed:\n" + r.stderr)
+for bad in ("0-1", "2-3", "0-3"):
+    check(run("amend", bad, "too fine", store=edge).returncode == 1
+          and run("retract", bad, "too fine", store=edge).returncode == 1,
+          "amend/retract accepted %s below the RAW_MIN=8 floor" % bad)
+# a single memory is still amendable: RAW_MIN is a floor on BLOCKS, not on ids
+check(run("amend", "3", "edge entry 3, corrected", store=edge).returncode == 0,
+      "RAW_MIN blocked amending one raw memory")
+
+# resummarize drops a floor block and everything above it; the next nap asks
+# for exactly that block again, from raw
+r = run("resummarize", "0-7", store=edge)
+check(r.returncode == 0 and "0-7" in r.stdout,
+      "resummarize refused a floor block:\n" + r.stdout + r.stderr)
+r = run("wake", store=edge)
+check(nap_id(r.stdout) == "0-7",
+      "the dropped floor block was not asked for again:\n" + r.stdout)
+check(run("resummarize", "0-3", store=edge).returncode == 1,
+      "resummarize accepted a range below the floor")
+check(run("doctor", store=edge).returncode == 0,
+      "a RAW_MIN=8 store failed doctor after amend/retract/resummarize")
+shutil.rmtree(edge)
+
+# RAW_MIN == RAW_MAX is the tightest legal window: the floor block still reads
+# raw, and the level above it must fall back to the two half summaries.
+tight = tempfile.mkdtemp(prefix="optmem-tight-")
+os.makedirs(os.path.join(tight, "TREE"))
+open(os.path.join(tight, "LOG.txt"), "wb").close()
+run("config", "RAW_MIN=4", "RAW_MAX=4", store=tight)
+for i in range(8):
+    run("note", "tight entry %d" % i, store=tight)
+run("nap", "0-3", "first tight half", store=tight)
+prompt = run("nap", "4-7", "second tight half", store=tight).stdout
+check("#0-3 first tight half" in prompt and "#4-7 second tight half" in prompt
+      and "tight entry 0" not in prompt,
+      "RAW_MIN=RAW_MAX=4 did not merge 0-7 from its halves:\n" + prompt)
+check(run("doctor", store=tight).returncode == 0, "a tight-window store failed doctor")
+shutil.rmtree(tight)
+
+# RAW_MIN and RAW_MAX bracket one window: the smallest block the tree builds
+# has to fit in a single merge prompt.
+for bad in ("RAW_MIN=1", "RAW_MIN=3", "RAW_MIN=512", "RAW_MIN=x"):
+    check(run("config", bad, store=floored).returncode == 1,
+          "config accepted %s" % bad)
+check(run("config", "RAW_MIN=32", store=floored).returncode == 1,
+      "RAW_MIN was allowed past the default RAW_MAX")
+check(run("config", "RAW_MIN=32", "RAW_MAX=32", store=floored).returncode == 0,
+      "RAW_MIN=32 was refused alongside a RAW_MAX that fits it")
+with open(os.path.join(floored, "config"), "a", encoding="utf-8") as f:
+    f.write("RAW_MIN=64\nRAW_MAX=16\n")
+check(run("wake", store=floored).returncode == 1,
+      "a config file with RAW_MIN past RAW_MAX was read anyway")
+shutil.rmtree(floored)
 
 with open(os.path.join(d, "config"), "a") as f:
     f.write("WAKE_LINES=120\n")          # a size the user tuned by hand

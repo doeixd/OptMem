@@ -139,6 +139,7 @@ KNOBS = {
     "ENTRY_CHARS": (280, "the longest one memory may be, in bytes"),
     "PART_CHARS": (20000, "output paging: largest part, in bytes"),
     "PART_LINES": (500, "output paging: largest part, in lines"),
+    "RAW_MIN": (2, "compression: summarize only once this many exist"),
     "RAW_MAX": (16, "compression: merge up to this many raw memories at once"),
     "LOG_REC": (320, "record width of LOG.txt; changeable only while empty"),
     "TREE_REC": (288, "record width of summaries; changeable only while empty"),
@@ -151,6 +152,7 @@ ENTRY_CHARS = KNOBS["ENTRY_CHARS"][0]
 # parts that fit all of them. These are transport limits, not memory limits.
 PART_CHARS = KNOBS["PART_CHARS"][0]
 PART_LINES = KNOBS["PART_LINES"][0]
+RAW_MIN = KNOBS["RAW_MIN"][0]  # the floor of the tree: nothing below it is summarized
 RAW_MAX = KNOBS["RAW_MAX"][0]
 MAX_RECALL_LIMIT = 1000
 MAX_RECALL_CONTEXT = 20
@@ -194,6 +196,12 @@ def _cover(T, alpha):
             continue
         size = hi - lo
         if size > 1 and (hi > T or size > alpha * (T - lo)):
+            if size <= RAW_MIN:
+                # The floor of the tree: nothing narrower than RAW_MIN is ever
+                # summarized, so a block that must be refined past it opens
+                # straight to raw memories -- which cost nothing to read.
+                out.extend((i, i + 1) for i in range(lo, min(hi, T)))
+                continue
             mid = (lo + hi) // 2
             stack.append((mid, hi))
             stack.append((lo, mid))
@@ -223,12 +231,24 @@ def cover(T, budget):
     # Block sizes jump in powers of two, so alpha alone can undershoot the
     # budget. Spend what is left on the present, where detail is worth most.
     while len(out) < budget:
-        i = max((i for i, b in enumerate(out) if b[1] - b[0] > 1), default=None)
+        # The most recent refinable block wins. At the floor of the tree the
+        # only refinement is the whole block as raw memories, so it is taken
+        # only when every one of those lines fits the budget.
+        i = None
+        for k, (a, b) in enumerate(out):
+            if b - a == 1:
+                continue
+            if b - a <= RAW_MIN and len(out) + (min(b, T) - a - 1) > budget:
+                continue
+            i = k
         if i is None:
             break
         lo_, hi_ = out[i]
-        mid = (lo_ + hi_) // 2
-        out[i:i + 1] = [(lo_, mid), (mid, hi_)]
+        if hi_ - lo_ <= RAW_MIN:
+            out[i:i + 1] = [(j, j + 1) for j in range(lo_, min(hi_, T))]
+        else:
+            mid = (lo_ + hi_) // 2
+            out[i:i + 1] = [(lo_, mid), (mid, hi_)]
     return out
 
 
@@ -752,6 +772,10 @@ def size(k, v, where="", widths=None):
             "and the entry." % where)
     if k == "TREE_REC" and not 48 <= value <= 65536:
         die("%sTREE_REC is 48 to 65536." % where)
+    if k == "RAW_MIN" and (value < 2 or value > 256 or value & (value - 1)):
+        die("%sRAW_MIN is a power of two from 2 to 256: it is the smallest "
+            "block the merge tree builds, and blocks are aligned "
+            "powers of two." % where)
     if k == "RAW_MAX" and not 2 <= value <= 256:
         die("%sRAW_MAX is 2 to 256: blocks merge pairwise, and one merge "
             "prompt has to fit a harness's output." % where)
@@ -790,6 +814,14 @@ def overrides(d):
     for k, (v, where) in raw.items():
         if k not in ("LOG_REC", "TREE_REC"):
             out[k] = size(k, v, where, widths=tuple(widths))
+    # The raw window has to be a window: the smallest block the tree builds
+    # cannot be wider than the most raw memories one merge may read.
+    low = out.get("RAW_MIN", KNOBS["RAW_MIN"][0])
+    high = out.get("RAW_MAX", KNOBS["RAW_MAX"][0])
+    if low > high:
+        die("%sRAW_MIN is %d but RAW_MAX is %d: the smallest block must fit "
+            "in one merge. Raise RAW_MAX, or lower RAW_MIN."
+            % (raw.get("RAW_MIN", ("", ""))[1], low, high))
     return out
 
 
@@ -1256,6 +1288,38 @@ def tree_drop(d, lo, hi):
         lock.close()
 
 
+def prune_levels(d, floor):
+    """Delete the tree levels finer than `floor`, newest floor first. They are
+    a cache no read reaches once RAW_MIN is raised; LOG.txt is authoritative
+    and untouched, so this loses no memory and no coarser summary."""
+    gone = []
+    lock = locked(d)
+    try:
+        for level in sorted(_tree_levels(d), reverse=True):
+            if level >= floor:
+                continue
+            path = tree_path(d, level)
+            if os.path.islink(path):
+                raise OSError("refusing symbolic-link tree level %d" % level)
+            os.remove(path)
+            gone.append(level)
+        return gone
+    finally:
+        lock.close()
+
+
+def _tree_levels(d):
+    """Every power-of-two level file this store has on disk."""
+    out = []
+    root = os.path.join(d, "TREE")
+    if os.path.islink(root):
+        raise OSError("refusing symbolic-link TREE directory")
+    for name in os.listdir(root):
+        if name.isdigit() and int(name) >= 2 and not int(name) & (int(name) - 1):
+            out.append(int(name))
+    return out
+
+
 def tree_invalidate_memory(d, ident):
     """Remove every existing summary that could contain one raw memory."""
     gone = []
@@ -1269,8 +1333,8 @@ def tree_invalidate_memory(d, ident):
             if not name.isdigit():
                 continue
             size = int(name)
-            if size < 2 or size & (size - 1):
-                continue
+            if size < RAW_MIN or size & (size - 1):
+                continue  # not a level this store builds
             path, index = tree_path(d, size), ident // size
             if os.path.islink(path):
                 raise OSError("refusing symbolic-link tree level %s" % name)
@@ -1311,8 +1375,9 @@ def block_id(s):
         die("'%s' is not a block id. Copy it from the prompt." % s)
     lo, hi = int(m.group(1)), int(m.group(2)) + 1
     n = hi - lo
-    if n < 2 or n & (n - 1) or lo % n:
-        die("%s is not a block. Copy the id printed by wake, like 16-31." % s)
+    if n < RAW_MIN or n & (n - 1) or lo % n:
+        die("%s is not a block. Copy the id printed by wake, like %d-%d."
+            % (s, RAW_MIN, 2 * RAW_MIN - 1))
     return lo, hi
 
 
@@ -1555,7 +1620,7 @@ def pending(d, T, limit=None):
     """Blocks that can be built and have not been, smallest first. Each level
     file holds a dense prefix, so its length says exactly how far that level
     got: this costs one stat per level, never a scan."""
-    todo, size = [], 2
+    todo, size = [], RAW_MIN
     while size <= T:
         have = count(tree_path(d, size), TREE_REC)
         for k in range(have, T // size):
@@ -1570,7 +1635,7 @@ def pending_count(d, T):
     """How many blocks pending() would list, without listing them. A level can
     hold MORE blocks than T needs -- T is a snapshot, and memories keep
     arriving while an agent reads -- so each level is clamped at zero."""
-    n, size = 0, 2
+    n, size = 0, RAW_MIN
     while size <= T:
         n += max(0, T // size - count(tree_path(d, size), TREE_REC))
         size *= 2
@@ -1625,7 +1690,7 @@ def batch_pending(d, T, limit):
     These jobs are independent and can be summarized together. Keeping one
     level per batch also lets --apply commit the whole batch in one fsync.
     """
-    size = 2
+    size = RAW_MIN
     while size <= T:
         have, needed = count(tree_path(d, size), TREE_REC), T // size
         if have < needed:
@@ -1877,7 +1942,7 @@ _memo_completion() {
             fi
             ;;
         config)
-            _memo_compgen -W "WAKE_LINES= ENTRY_CHARS= PART_CHARS= PART_LINES= RAW_MAX= LOG_REC= TREE_REC=" -- "$cur"
+            _memo_compgen -W "WAKE_LINES= ENTRY_CHARS= PART_CHARS= PART_LINES= RAW_MIN= RAW_MAX= LOG_REC= TREE_REC=" -- "$cur"
             ;;
         import)
             if [[ "$cur" == --* ]]; then
@@ -1969,7 +2034,7 @@ _memo() {
                 '1:output file:_files'
             ;;
         config)
-            _values 'setting' 'WAKE_LINES=' 'ENTRY_CHARS=' 'PART_CHARS=' 'PART_LINES=' 'RAW_MAX=' 'LOG_REC=' 'TREE_REC='
+            _values 'setting' 'WAKE_LINES=' 'ENTRY_CHARS=' 'PART_CHARS=' 'PART_LINES=' 'RAW_MIN=' 'RAW_MAX=' 'LOG_REC=' 'TREE_REC='
             ;;
         import) _arguments '--dry-run[validate without writing]' '1:memory file:_files' ;;
     esac
@@ -2029,7 +2094,7 @@ complete -c memo -n 'contains -- import (commandline -opc)' -l dry-run -d 'Valid
 complete -c memo -n 'contains -- qmd (commandline -opc)' -a 'enable status sync rebuild config disable help'
 complete -c memo -n 'contains -- qmd (commandline -opc); and contains -- config (commandline -opc)' -a 'FALLBACK=on FALLBACK=off'
 complete -c memo -n 'contains -- qmd (commandline -opc); and contains -- disable (commandline -opc)' -l purge -d 'Remove the disposable projection'
-complete -c memo -n 'contains -- config (commandline -opc)' -a 'WAKE_LINES= ENTRY_CHARS= PART_CHARS= PART_LINES= RAW_MAX= LOG_REC= TREE_REC='""",
+complete -c memo -n 'contains -- config (commandline -opc)' -a 'WAKE_LINES= ENTRY_CHARS= PART_CHARS= PART_LINES= RAW_MIN= RAW_MAX= LOG_REC= TREE_REC='""",
     "powershell": r"""# PowerShell completion for memo
 Register-ArgumentCompleter -Native -CommandName memo -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
@@ -2087,7 +2152,7 @@ Register-ArgumentCompleter -Native -CommandName memo -ScriptBlock {
             redact     { '--force' }
             export     { '--with-ids' }
             import     { '--dry-run' }
-            config     { 'WAKE_LINES=', 'ENTRY_CHARS=', 'PART_CHARS=', 'PART_LINES=', 'RAW_MAX=', 'LOG_REC=', 'TREE_REC=' }
+            config     { 'WAKE_LINES=', 'ENTRY_CHARS=', 'PART_CHARS=', 'PART_LINES=', 'RAW_MIN=', 'RAW_MAX=', 'LOG_REC=', 'TREE_REC=' }
             default    { @() }
         }
     }
@@ -2155,19 +2220,47 @@ def agent_block(d, newline="\n"):
     return newline.join((AGENT_START, body.replace("\n", newline), AGENT_END))
 
 
-def _setup_plan(path, block_for, create):
+def _resolve_target(name):
+    """(as named, the file it actually names). AGENTS.md and CLAUDE.md are
+    frequently two names for one file -- a symlink either way, or a hard link
+    on Windows, where symlinks need a privilege many checkouts lack. Setup
+    follows the link and edits the file, so the instructions land in it once
+    and the link itself is never replaced by a regular file."""
+    name = os.path.abspath(os.path.expanduser(name))
+    real = os.path.realpath(name)
+    if os.path.normcase(real) != os.path.normcase(name):
+        if os.path.lexists(name) and not os.path.exists(name):
+            die("%s is a link to %s, which does not exist. Point it at a "
+                "file, or name that file directly." % (pretty(name),
+                                                       pretty(real)))
+    return name, real
+
+
+def _target_key(real):
+    """One file's identity. realpath alone cannot see a HARD link: two names,
+    two paths, one inode -- so the file itself is asked who it is."""
+    try:
+        st = os.stat(real)
+        if st.st_ino:
+            return st.st_dev, st.st_ino
+    except OSError:
+        pass  # not there yet: the path is the only identity it has
+    return os.path.normcase(real)
+
+
+def _setup_plan(name, real, block_for, create):
     """Preflight one instruction file without changing it."""
-    path = os.path.abspath(os.path.expanduser(path))
-    if os.path.islink(path):
-        die("Refusing to replace symlink %s." % pretty(path))
+    path = real
     exists = os.path.exists(path)
     if not exists and not create:
-        return path, b"", b"", "skipped", False
+        return name, path, b"", b"", "skipped", False
     parent = os.path.dirname(path)
     if not os.path.isdir(parent):
         die("Parent directory does not exist: %s." % pretty(parent))
     if os.path.isdir(path):
         die("Instruction target is a directory: %s." % pretty(path))
+    if exists and not os.path.isfile(path):
+        die("Instruction target is not a regular file: %s." % pretty(path))
 
     raw = open(path, "rb").read() if exists else b""
     bom = b"\xef\xbb\xbf" if raw.startswith(b"\xef\xbb\xbf") else b""
@@ -2197,13 +2290,26 @@ def _setup_plan(path, block_for, create):
     else:
         updated = block + (newline * 2 + text if text else newline)
         action = "added"
-    return path, raw, bom + updated.encode("utf-8"), action, exists
+    return name, path, raw, bom + updated.encode("utf-8"), action, exists
 
 
 def _atomic_replace(path, data, existing):
     """Replace one preflighted file in its directory, preserving its mode."""
     parent = os.path.dirname(path)
-    mode = os.stat(path).st_mode if existing else None
+    stat_ = os.stat(path) if existing else None
+    mode = stat_.st_mode if existing else None
+    if stat_ is not None and getattr(stat_, "st_nlink", 1) > 1:
+        # This inode has other names -- AGENTS.md hard-linked to CLAUDE.md.
+        # os.replace would leave the new content under one name and the old
+        # content under the other, so the file is rewritten THROUGH the inode
+        # every name shares. That trades atomicity for the invariant the user
+        # actually chose when they linked them: one file, one set of contents.
+        with open(path, "r+b") as f:
+            f.write(data)
+            f.truncate()
+            f.flush()
+            os.fsync(f.fileno())
+        return
     fd, temporary = tempfile.mkstemp(prefix=".optmem-", suffix=".tmp",
                                      dir=parent)
     try:
@@ -2238,37 +2344,48 @@ def cmd_setup(d, args):
     if create and explicit_no_create:
         die("Use either --create or --no-create, not both.")
     targets = targets or ["AGENTS.md", "CLAUDE.md"]
-    unique, seen = [], set()
+    unique, seen, aliases = [], {}, []
     for target in targets:
-        key = os.path.normcase(os.path.realpath(os.path.abspath(
-            os.path.expanduser(target))))
-        if key not in seen:
-            seen.add(key)
-            unique.append(target)
+        name, real = _resolve_target(target)
+        key = _target_key(real)
+        if key in seen:
+            # A second name for a file already planned: AGENTS.md linked to
+            # CLAUDE.md, or the same path twice. One file takes one block.
+            aliases.append((name, seen[key]))
+            continue
+        seen[key] = name
+        unique.append((name, real))
 
     block_for = lambda newline: agent_block(d, newline)
-    plans = [_setup_plan(target, block_for, create) for target in unique]
+    plans = [_setup_plan(name, real, block_for, create)
+             for name, real in unique]
     # Preflight every target before the first write. A malformed second file
     # must not leave the first file half-configured.
-    for path, before, after, action, existing in plans:
+    for name, path, before, after, action, existing in plans:
         if action not in ("current", "legacy", "skipped"):
             current_exists = os.path.exists(path)
             current = open(path, "rb").read() if current_exists else b""
             if current_exists != existing or current != before:
                 die("Instruction file changed during setup: %s." % pretty(path))
             _atomic_replace(path, after, existing)
+        # Name the file that was edited, and the link it was reached through:
+        # `setup` was asked about AGENTS.md, so silence about CLAUDE.md would
+        # read as a file left unconfigured.
+        where = pretty(path) if os.path.normcase(path) == os.path.normcase(name) \
+            else "%s (through %s)" % (pretty(path), pretty(name))
         if action == "added":
-            print("Added OptMem instructions to %s." % pretty(path))
+            print("Added OptMem instructions to %s." % where)
         elif action == "updated":
-            print("Updated OptMem instructions in %s." % pretty(path))
+            print("Updated OptMem instructions in %s." % where)
         elif action == "legacy":
-            print("Already configured: %s (unmanaged legacy block)."
-                  % pretty(path))
+            print("Already configured: %s (unmanaged legacy block)." % where)
         elif action == "skipped":
-            print("Skipped missing: %s (use --create to create it)."
-                  % pretty(path))
+            print("Skipped missing: %s (use --create to create it)." % where)
         else:
-            print("Already configured: %s." % pretty(path))
+            print("Already configured: %s." % where)
+    for alias, first in aliases:
+        print("%s is the same file as %s: written once."
+              % (pretty(alias), pretty(first)))
 
 
 def cmd_completion(d, args):
@@ -2933,8 +3050,20 @@ def cmd_config(d, args):
     if over.get("ENTRY_CHARS", KNOBS["ENTRY_CHARS"][0]) > top:
         die("These widths cap ENTRY_CHARS at %d. Lower ENTRY_CHARS in the "
             "same command." % top)
+    low = over.get("RAW_MIN", KNOBS["RAW_MIN"][0])
+    high = over.get("RAW_MAX", KNOBS["RAW_MAX"][0])
+    if low > high:
+        die("RAW_MIN %d is wider than RAW_MAX %d: the smallest block the tree "
+            "builds must fit in one merge. Set both in the same command." %
+            (low, high))
     if args:
         write_config(d, over)
+        # Raising the floor orphans every finer level: no read reaches them
+        # again, and the coarser summaries built from them stay valid. The log
+        # is untouched, so pruning them loses nothing.
+        for gone in prune_levels(d, low):
+            print("Pruned TREE/%d: RAW_MIN is %d, so that level is no longer "
+                  "read." % (gone, low))
     for k, (default, what) in KNOBS.items():
         print("%-12s %-7d %s%s" % (k, over.get(k, default), what,
                                    "" if k not in over else
@@ -3858,8 +3987,10 @@ def cmd_zoom(d, args):
     def descend(a, b, remaining):
         if a >= T:
             return  # the future: no memories there yet
-        if b - a == 1:
-            lines.append("#%d %s %s" % log_get(d, a))
+        if b - a < RAW_MIN:
+            # Below the floor of the tree there is nothing to read but the
+            # memories themselves, so one level opens all of them at once.
+            lines.extend("#%d %s %s" % e for e in log_slice(d, a, min(b, T)))
         elif remaining:
             mid = (a + b) // 2
             descend(a, mid, remaining - 1)
@@ -4185,6 +4316,12 @@ def _verify_store(d):
             if width < 2 or width & (width - 1):
                 errors.append("TREE/%s is not a power-of-two level" % name)
                 continue
+            if width < RAW_MIN:
+                # A level left behind by a lower RAW_MIN. Nothing reads it, so
+                # it is stale, not broken -- and `config RAW_MIN=` prunes it.
+                warnings.append("TREE/%s is below RAW_MIN=%d: a stale level "
+                                "no read uses" % (name, RAW_MIN))
+                continue
             length = os.path.getsize(node)
             if length % TREE_REC:
                 errors.append("TREE/%s has %d trailing byte(s)"
@@ -4209,7 +4346,7 @@ def _verify_store(d):
                     if not summary:
                         errors.append("TREE/%s has a blank node inside its "
                                       "dense prefix at index %d" % (name, index))
-            if width > 2 and count_:
+            if width > RAW_MIN and count_:
                 child = tree_path(d, width // 2)
                 child_count = count(child, TREE_REC)
                 needed = count_ * 2
