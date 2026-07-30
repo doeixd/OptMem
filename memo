@@ -127,7 +127,7 @@ ME = TOOL
 
 # The memory that follows you everywhere, as opposed to the one per project.
 GLOBAL = "~/.optmem/memory"
-VERSION = "2.0.4"
+VERSION = "2.1.0"
 INSTALL_BASE = "https://github.com/doeixd/OptMem/releases/latest/download"
 SCOPE_GLOBAL = False  # set by main() from `--global`
 

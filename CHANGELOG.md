@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.0 — 2026-07-30
 
 ### `RAW_MIN`: how often a compression is asked
 
@@ -41,6 +41,15 @@
   `is the same file as ...: written once`, so a skipped target is never
   silently absent. A dangling symlink is reported instead of being turned
   into a regular file, and a non-regular target is refused.
+
+### Agent instructions: what does not belong in memory
+
+- The managed block defined what to record but excluded only secrets and
+  "redundant memories". It now states the exclusions — what git already
+  answers, the status of work in progress, what stops mattering when the task
+  ends — prefers why over what, asks for a memory written at an outcome rather
+  than mid-attempt, and requires one that stands alone months later. Run
+  `memo setup` to update an existing instruction file.
 
 ## 2.0.4 — 2026-07-29
 
