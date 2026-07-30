@@ -127,7 +127,7 @@ ME = TOOL
 
 # The memory that follows you everywhere, as opposed to the one per project.
 GLOBAL = "~/.optmem/memory"
-VERSION = "2.1.1"
+VERSION = "2.1.2"
 INSTALL_BASE = "https://github.com/doeixd/OptMem/releases/latest/download"
 SCOPE_GLOBAL = False  # set by main() from `--global`
 
@@ -899,6 +899,22 @@ def log_slice(d, lo, hi):
         return records(f.read((hi - lo) * LOG_REC))
 
 
+def log_stream(d, lo, hi):
+    """Memories [lo,hi), read in chunks. Same content as log_slice, but a
+    long tail is never held in memory at once."""
+    with open(log_path(d), "rb") as f:
+        f.seek(lo * LOG_REC)
+        left = hi - lo
+        while left > 0:
+            take = min(left, 4096)
+            buf = f.read(take * LOG_REC)
+            if not buf:
+                return
+            for e in records(buf):
+                yield e
+            left -= take
+
+
 def log_get(d, i):
     """(id, date, text) of memory i, in one seek."""
     return log_slice(d, i, i + 1)[0]
@@ -1446,6 +1462,72 @@ def _lifecycle_target(match):
     return None if hi < lo else (lo, hi)
 
 
+# How many later references one compression prompt will show per range.
+# A correction is a cue, not the content: a handful is enough to warn the
+# summarizing session, and the prompt has a hard size budget to respect.
+LIFECYCLE_CUES = 4
+
+
+def lifecycle_refs(d, ranges, T, cap=LIFECYCLE_CUES):
+    """Lifecycle records that target a range from OUTSIDE it.
+
+    A summary is written from the records inside its own range, but
+    supersession outlives compression: `Amends #4` may be written long after
+    the block holding #4 was built, landing in a different block entirely.
+    The merging session is then told that later amendments override what they
+    reference while being shown none of them. This finds them.
+
+    References are backward-only -- a record targeting [lo,hi) must have been
+    written at an id >= hi -- so the scan starts at the earliest range end and
+    reads forward, never the whole log."""
+    out = dict(((lo, hi), []) for lo, hi in ranges)
+    if not ranges:
+        return out
+    start = min(hi for _, hi in ranges)
+    if start >= T:
+        return out
+    for ident, date, text in log_stream(d, start, T):
+        match = _LIFECYCLE_REF.match(text)
+        if not match:
+            continue
+        span = _lifecycle_target(match)
+        if span is None:
+            continue
+        first, last = span
+        for lo, hi in ranges:
+            # A reference written inside the range is already content there.
+            if ident < hi or first >= hi or last < lo:
+                continue
+            if len(out[(lo, hi)]) < cap:
+                out[(lo, hi)].append((ident, date, text))
+    return out
+
+
+def lifecycle_lines(refs):
+    """The prompt block naming later references to the range being compressed.
+
+    They are context, not content: they belong to a different block, and
+    summarizing them here would duplicate them into two summaries."""
+    if not refs:
+        return []
+    return ["  Later corrections to these memories, written outside this "
+            "range -- context only, do not summarize them here, but let "
+            "them override:"] + ["    #%d %s %s" % e for e in refs]
+
+
+def covering_block(d, ident):
+    """The smallest built summary that already contains one raw memory, or
+    None. A correction aimed at #ident does not reach a summary that has
+    already absorbed it; when one exists, the block form of amend does."""
+    total, size = log_len(d), RAW_MIN
+    while size <= total:
+        lo = (ident // size) * size
+        if tree_get(d, lo, lo + size) is not None:
+            return (lo, lo + size)
+        size *= 2
+    return None
+
+
 # A hook is an OPTIONAL user command named by an environment variable --
 # never a file inside the store, which synchronization or import could turn
 # into an arbitrary-code-execution vector. PRE rewrites or vetoes a memory
@@ -1589,9 +1671,11 @@ def _append_lifecycle(d, action, target, text, fit=False, date=None):
             die("No block %d-%d: this store holds %s."
                 % (lo, hi - 1, plural(total, "memory")))
         ref = label = "#%d-#%d" % (lo, hi - 1)
+        covered = None
     else:
         ident = require_memory(d, target)
         ref = label = "#%d" % ident
+        covered = covering_block(d, ident)
     text = pre_hook(text)
     dropped = ""
     if fit:
@@ -1608,6 +1692,14 @@ def _append_lifecycle(d, action, target, text, fit=False, date=None):
     if dropped:
         print("Fitted: cut the last %d bytes at a word boundary: \"%s\""
               % (len(dropped.encode()), dropped))
+    if covered:
+        # The summary already absorbed this memory and keeps its own wording.
+        # Correcting the raw entry does not reach it; the block form does.
+        print("Note: %s is summarized in #%d-#%d. If the wording being "
+              "corrected is that summary's, `%s %s %d-%d \"...\"` supersedes "
+              "the block itself."
+              % (label, covered[0], covered[1] - 1, ME, action.lower()[:-1],
+                 covered[0], covered[1] - 1))
     post_hook("#%d %s %s" % log_get(d, created))
     nap = next_nap(d, created + 1)
     if nap:
@@ -1642,7 +1734,7 @@ def pending_count(d, T):
     return n
 
 
-def nap_prompt(d, lo, hi, left):
+def nap_prompt(d, lo, hi, left, T=None):
     if hi - lo <= RAW_MAX:
         body = "\n".join("  #%d %s %s" % e for e in log_slice(d, lo, hi))
     else:
@@ -1657,6 +1749,11 @@ def nap_prompt(d, lo, hi, left):
                     % (a, b - 1, ME, a, b - 1))
             halves.append("  #%d-%d %s" % (a, b - 1, s))
         body = "\n".join(halves)
+    cues = lifecycle_lines(
+        lifecycle_refs(d, [(lo, hi)], T if T is not None else log_len(d))[
+            (lo, hi)])
+    if cues:
+        body += "\n" + "\n".join(cues)
     tail = "" if not left else "\n%s after this one." % (
         "1 compression remains" if left == 1 else
         "%d compressions remain" % left)
@@ -1681,7 +1778,7 @@ def next_nap(d, T):
     if not todo:
         return None
     lo, hi = todo[0]
-    return nap_prompt(d, lo, hi, pending_count(d, T) - 1)
+    return nap_prompt(d, lo, hi, pending_count(d, T) - 1, T)
 
 
 def batch_pending(d, T, limit):
@@ -1700,7 +1797,7 @@ def batch_pending(d, T, limit):
     return []
 
 
-def batch_nap_prompt(d, jobs, left):
+def batch_nap_prompt(d, jobs, left, T=None):
     lines = [
         "Compress each range independently into one line of at most %d UTF-8 "
         "bytes." % ENTRY_CHARS,
@@ -1711,6 +1808,7 @@ def batch_nap_prompt(d, jobs, left):
         "repetition; invent nothing.",
         "",
     ]
+    cues = lifecycle_refs(d, jobs, T if T is not None else log_len(d))
     for lo, hi in jobs:
         lines.append("%d-%d:" % (lo, hi - 1))
         if hi - lo <= RAW_MAX:
@@ -1725,6 +1823,7 @@ def batch_nap_prompt(d, jobs, left):
                         "%s resummarize %d-%d"
                         % (a, b - 1, ME, a, b - 1))
                 lines.append("  #%d-%d %s" % (a, b - 1, summary))
+        lines.extend(lifecycle_lines(cues[(lo, hi)]))
         lines.append("")
     lines.extend([
         "Write a UTF-8 file with one TAB-separated result per line:",
@@ -1741,7 +1840,7 @@ def fitted_batch_prompt(d, T, requested):
     jobs = batch_pending(d, T, requested)
     total = pending_count(d, T)
     while jobs:
-        prompt = batch_nap_prompt(d, jobs, total - len(jobs))
+        prompt = batch_nap_prompt(d, jobs, total - len(jobs), T)
         if (len(prompt.encode("utf-8")) <= PART_CHARS and
                 len(prompt.splitlines()) <= PART_LINES):
             return jobs, prompt

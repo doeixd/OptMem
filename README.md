@@ -280,6 +280,14 @@ it lists that supersession as a later reference. (`amend`/`retract` write
 only aligned blocks; `import` also tolerates plain `#a-#b` ranges from
 foreign histories.)
 
+A correction never rewrites an existing summary — `LOG.txt` is authoritative
+and the tree is a rebuildable cache — so it reaches the tree only through
+later merges. Two things keep that from losing it. When the target is already
+inside a built summary, `amend`/`retract` say so and name the block form. And
+a compression prompt lists lifecycle records that target its range from
+outside it, marked as context rather than content, so the session merging
+`#0-3` is shown the `Amends #0` that was written at `#57`.
+
 ### Hooks
 
 Three optional environment variables name commands that process memories.
