@@ -1001,6 +1001,42 @@ check(block_shown.returncode == 0
       "show of a block did not list its supersession:\n" + block_shown.stdout)
 check(run("show", "3-9", store=life).returncode == 1,
       "show accepted a non-block range")
+# A correction can be written long after the block holding its target was
+# built, and it lands in a different block. Two guards keep it from being
+# lost: amend names the summary that already absorbed the memory, and the
+# compression prompt shows corrections aimed into the range it is merging.
+drift = tempfile.mkdtemp(prefix="optmem-drift-")
+os.makedirs(os.path.join(drift, "TREE"))
+open(os.path.join(drift, "LOG.txt"), "wb").close()
+for i in range(4):
+    run("note", "drift memory number %d" % i, store=drift)
+for pair in ("0-1", "2-3"):
+    check(run("nap", pair, "summary of " + pair, store=drift).returncode == 0,
+          "seeding the drift store's summaries failed")
+hinted = run("amend", "0", "drift memory zero, corrected", store=drift)
+check(hinted.returncode == 0
+      and "#0 is summarized in #0-#1" in hinted.stdout
+      and "amend 0-1" in hinted.stdout,
+      "amend did not name the summary that already holds the memory:\n"
+      + hinted.stdout + hinted.stderr)
+plain = run("amend", "4", "the correction itself, corrected", store=drift)
+check(plain.returncode == 0 and "is summarized in" not in plain.stdout,
+      "amend hinted a covering summary that does not exist:\n" + plain.stdout)
+# #4 amends #0 from outside the pending block 0-3: the merge must see it.
+outside = cli.nap_prompt(drift, 0, 4, 0, cli.log_len(drift))
+check("Later corrections to these memories" in outside
+      and "#4 " in outside and "Amends #0:" in outside,
+      "the compression prompt hid a later correction aimed into its range:\n"
+      + outside)
+check(outside.count("drift memory zero, corrected") == 1,
+      "a later correction was shown twice in one prompt:\n" + outside)
+# #5 amends #4 and both sit inside 4-5: already content, never a cue there.
+inside = cli.nap_prompt(drift, 4, 6, 0, cli.log_len(drift))
+check("Later corrections to these memories" not in inside,
+      "a reference inside the range was duplicated as external context:\n"
+      + inside)
+shutil.rmtree(drift, ignore_errors=True)
+
 # --fit works where the budget is tightest: after the lifecycle prefix
 long_fix = ("delta echo foxtrot " * 20).strip()
 fit_amend = run("amend", "--fit", "0-1", long_fix, store=life)

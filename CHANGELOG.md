@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.1.2 — 2026-07-30
+
+### A correction now reaches the summaries that outlive it
+
+An amendment is an ordinary appended memory: it never rewrites the summary
+lines that already absorbed its target, and it should not — `LOG.txt` is
+authoritative and `TREE` is a rebuildable cache. It reaches the tree only
+when a later merge covering it carries it forward. Two gaps in that path are
+closed.
+
+- `nap` prompts now list lifecycle records that target the range being
+  compressed from *outside* it, marked as context rather than content
+  ("do not summarize them here, but let them override"). The prompt already
+  instructed the session that later amendments override what they reference,
+  while showing it only the records inside the range: an `Amends #0` written
+  at `#57` was invisible to the merge of `#0-3`, and the correction was lost
+  at that level. Up to four are shown per range, in both single and
+  `--batch` prompts. References are backward-only, so the lookup scans
+  forward from the range's end and never the whole log.
+- `amend <id>` and `retract <id>` now say when the target already sits inside
+  a built summary, and name the block form that supersedes it
+  (`Note: #4 is summarized in #0-#7. ... memo amend 0-7 "..."`). Correcting
+  the raw memory leaves that summary's own wording standing; the hint is
+  printed at the moment the distinction matters. The block form of
+  `amend`/`retract` is unchanged.
+
+Neither changes the record format, and no store needs migrating.
+
 ## 2.1.1 — 2026-07-30
 
 - Agent instructions: dropped "Write at an outcome, not mid-attempt". It
