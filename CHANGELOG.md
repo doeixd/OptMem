@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.1 — 2026-07-30
+
+- Agent instructions: dropped "Write at an outcome, not mid-attempt". It
+  discouraged the proven-defect memory — a found bug with its failure
+  mechanism, recorded before any fix — which in a 104-memory project store
+  was among the most valuable material held. "The status of work in progress"
+  already excludes what the rule was meant to exclude.
+- Agent instructions: point at the authoritative file or doc instead of
+  restating it. That store already does this in 19 of 104 memories; within a
+  280-byte entry an index into the repository is worth more than a copy of it.
+  Run `memo setup` to update an existing instruction file.
+
 ## 2.1.0 — 2026-07-30
 
 ### `RAW_MIN`: how often a compression is asked
